@@ -50,7 +50,7 @@ except ImportError:
         },
     }
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".svg"}
 OFFICE_VECTOR_EXTENSIONS = {".emf", ".wmf"}
 REPORT_WIDTH = 100
 CATEGORY_WIDTH = 50
@@ -328,25 +328,47 @@ def analyze_images(images_dir: str) -> list[ImageAnalysis]:
         # Check if it is an image file
         if os.path.isfile(filepath) and Path(filename).suffix.lower() in IMAGE_EXTENSIONS:
             try:
-                with Image.open(filepath) as img:
-                    width, height = img.size
-                    pixel_ratio = width / height
-                    aspect_ratio = _manifest_ratio(meta) or pixel_ratio
-                    layout_hint = classify_ratio(aspect_ratio)
+                if Path(filename).suffix.lower() == ".svg":
+                    import xml.etree.ElementTree as ET
+                    import re
+                    tree = ET.parse(filepath)
+                    root = tree.getroot()
+                    width_str = root.attrib.get('width', '100')
+                    height_str = root.attrib.get('height', '100')
+                    
+                    def parse_dim(dim_str):
+                        match = re.match(r'^([\d.]+)', str(dim_str))
+                        return float(match.group(1)) if match else 100.0
+                        
+                    width = int(parse_dim(width_str))
+                    height = int(parse_dim(height_str))
+                    
+                    if 'viewBox' in root.attrib and (width == 100 and height == 100 or '%' in str(width_str)):
+                        vb = root.attrib['viewBox'].split()
+                        if len(vb) == 4:
+                            width = int(float(vb[2]))
+                            height = int(float(vb[3]))
+                else:
+                    with Image.open(filepath) as img:
+                        width, height = img.size
+                
+                pixel_ratio = width / height if height > 0 else 1.0
+                aspect_ratio = _manifest_ratio(meta) or pixel_ratio
+                layout_hint = classify_ratio(aspect_ratio)
 
-                    result: ImageAnalysis = {
-                        'filename': filename,
-                        'width': width,
-                        'height': height,
-                        'aspect_ratio': aspect_ratio,
-                        'pixel_aspect_ratio': pixel_ratio,
-                        'ratio_source': 'manifest' if meta else 'pixel',
-                        'layout_hint': layout_hint,
-                        'filesize_kb': os.path.getsize(filepath) / 1024
-                    }
-                    _apply_manifest_metadata(result, meta)
-                    results.append(result)
-                    seen_filenames.add(filename)
+                result: ImageAnalysis = {
+                    'filename': filename,
+                    'width': width,
+                    'height': height,
+                    'aspect_ratio': aspect_ratio,
+                    'pixel_aspect_ratio': pixel_ratio,
+                    'ratio_source': 'manifest' if meta else 'pixel',
+                    'layout_hint': layout_hint,
+                    'filesize_kb': os.path.getsize(filepath) / 1024
+                }
+                _apply_manifest_metadata(result, meta)
+                results.append(result)
+                seen_filenames.add(filename)
             except Exception as e:
                 print(f"[WARN] Cannot read {filename}: {e}")
         elif os.path.isfile(filepath) and meta:
