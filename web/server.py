@@ -3,6 +3,7 @@ PPT Master Web Server — FastAPI REST + WebSocket.
 
 Endpoints:
   GET  /                          Serve the SPA (web/static/index.html)
+  GET  /jobs                      List all completed jobs (Library tab)
   POST /jobs                      Create a new generation job
   GET  /jobs/{job_id}             Get job status + metadata
   WS   /ws/{job_id}               Real-time log + event stream
@@ -60,6 +61,13 @@ async def serve_spa():
 # ── Job creation ──────────────────────────────────────────────────────────────
 
 
+@app.get("/jobs")
+async def list_jobs():
+    """Return all completed jobs with metadata for the Library tab."""
+    jobs = store.list_jobs()
+    return JSONResponse(jobs)
+
+
 @app.post("/jobs")
 async def create_job(
     topic: str = Form(...),
@@ -68,7 +76,7 @@ async def create_job(
     files: list[UploadFile] = File(default=[]),
 ):
     """Create a new PPT generation job."""
-    job_id = store.create_job()
+    job_id = store.create_job(topic=topic)
 
     # Save uploaded files
     uploaded_files = []
@@ -141,6 +149,9 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
                 if current and current["status"] in ("done", "error"):
                     break
                 continue
+            # Track slide count for the Library tab
+            if event.get("type") == "slide_ready":
+                store.increment_slide_count(job_id)
             await websocket.send_text(json.dumps(event))
             if event.get("type") in ("job_done", "error"):
                 break
@@ -205,18 +216,30 @@ def _inline_svg_images(svg_text: str, svg_dir: Path) -> str:
 
 @app.get("/jobs/{job_id}/slides/{slide_number}")
 async def get_slide(job_id: str, slide_number: int):
-    """Serve the SVG file for a given slide number, with images inlined as data URIs."""
+    """Serve the SVG file for a given slide number, with images inlined as data URIs.
+
+    Falls back to treating job_id as a project directory name under /app/projects/
+    when the job is not found in the DB (orphan projects created before the Library
+    feature existed).
+    """
     job = store.get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
 
-    project_path = job.get("project_path")
-    if not project_path:
-        raise HTTPException(status_code=404, detail="Project path not set yet")
+    if job is not None:
+        project_path = job.get("project_path")
+        if not project_path:
+            raise HTTPException(status_code=404, detail="Project path not set yet")
+        proj_dir = Path(project_path)
+    else:
+        # Fallback: treat job_id as a project directory name
+        proj_dir = REPO_ROOT / "projects" / job_id
+        if not proj_dir.is_dir():
+            raise HTTPException(status_code=404, detail="Job not found")
 
-    svg_dir = Path(project_path) / "svg_output"
+    svg_dir = proj_dir / "svg_output"
     if not svg_dir.exists():
-        svg_dir = Path(project_path) / "svg_final"
+        svg_dir = proj_dir / "svg_final"
+    if not svg_dir.exists():
+        raise HTTPException(status_code=404, detail="No SVG slides found for this job")
 
     # Find the Nth SVG (sorted alphabetically)
     svgs = sorted(svg_dir.glob("*.svg"))
@@ -335,14 +358,52 @@ async def debug_test_llm():
 
 @app.get("/jobs/{job_id}/download")
 async def download_pptx(job_id: str):
+    # 1. Exact match: exports/<job_id>.pptx  (DB-tracked jobs use UUID as filename)
     pptx_path = EXPORTS_DIR / f"{job_id}.pptx"
-    if not pptx_path.exists():
-        # Fallback: find any pptx in exports
-        candidates = sorted(EXPORTS_DIR.glob("*.pptx"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not candidates:
-            raise HTTPException(status_code=404, detail="PPTX not found")
-        pptx_path = candidates[0]
+    if pptx_path.exists():
+        return FileResponse(
+            str(pptx_path),
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            filename=pptx_path.name,
+        )
 
+    # 2. Orphan project: look for any PPTX whose stem starts with job_id (project dir name)
+    #    e.g. project dir "ppt169_foo_bar" → exports/ppt169_foo_bar_20260629.pptx
+    candidates = sorted(
+        [p for p in EXPORTS_DIR.glob("*.pptx") if p.stem == job_id or p.stem.startswith(job_id + "_")],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if candidates:
+        pptx_path = candidates[0]
+        return FileResponse(
+            str(pptx_path),
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            filename=pptx_path.name,
+        )
+
+    # 3. Last resort: newest PPTX in exports/
+    all_candidates = sorted(EXPORTS_DIR.glob("*.pptx"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not all_candidates:
+        raise HTTPException(status_code=404, detail="PPTX not found")
+    pptx_path = all_candidates[0]
+    return FileResponse(
+        str(pptx_path),
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        filename=pptx_path.name,
+    )
+
+
+@app.get("/exports/{filename}")
+async def download_export_by_filename(filename: str):
+    """Serve a PPTX directly from the exports directory by filename.
+
+    Used by synthetic Library entries for orphan PPTX files whose download_url
+    is /exports/<filename> rather than /jobs/<id>/download.
+    """
+    pptx_path = EXPORTS_DIR / filename
+    if not pptx_path.exists() or pptx_path.suffix.lower() != ".pptx":
+        raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(
         str(pptx_path),
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
