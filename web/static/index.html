@@ -1188,7 +1188,7 @@
 
     <!-- Tabs -->
     <div id="right-tabs">
-      <button class="tab-btn active" data-tab="log" onclick="switchTab('log')">
+      <button class="tab-btn" data-tab="log" onclick="switchTab('log')">
         📋 Log
       </button>
       <button class="tab-btn" data-tab="confirm" onclick="switchTab('confirm')" id="confirm-tab-btn" style="display:none;">
@@ -1199,13 +1199,13 @@
         🖼 Slides
         <span class="tab-badge" id="slides-badge" style="display:none;">0</span>
       </button>
-      <button class="tab-btn" data-tab="library" onclick="switchTab('library')" id="btn-library">
+      <button class="tab-btn active" data-tab="library" onclick="switchTab('library')" id="btn-library">
         📁 Library
       </button>
     </div>
 
     <!-- Log tab -->
-    <div class="tab-content active" id="tab-log">
+    <div class="tab-content" id="tab-log">
       <div id="log-container">
         <div class="log-empty" id="log-empty">
           <div class="log-empty-icon">🤖</div>
@@ -1279,7 +1279,7 @@
     </div>
 
     <!-- Library tab -->
-    <div class="tab-content" id="tab-library">
+    <div class="tab-content active" id="tab-library">
       <div id="panel-library">
         <div class="library-loading" id="library-loading" style="display:none;">
           <div class="spinner" style="width:24px;height:24px;border-width:3px;color:var(--accent);"></div>
@@ -1502,6 +1502,7 @@ async function startJob() {
 
     // Connect WebSocket
     connectWebSocket(state.jobId);
+    switchTab('log');
 
   } catch (err) {
     showToast(err.message);
@@ -2195,6 +2196,7 @@ async function loadJobSlides(jobId) {
 initThemeToggle();
 initSidebar();
 setStatus('idle');
+loadLibrary();
 </script>
 </body>
 </html>
