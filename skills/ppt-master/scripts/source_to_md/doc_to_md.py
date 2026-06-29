@@ -33,6 +33,14 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree as ET
 
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+
+configure_utf8_stdio()
+
 # ─────────────────────────────────────────────────────────────
 # Format registry
 # ─────────────────────────────────────────────────────────────
@@ -55,6 +63,10 @@ PANDOC_FORMATS = {
 # Formats pandoc should extract embedded media from
 PANDOC_MEDIA_FORMATS = {".odt"}
 OFFICE_VECTOR_EXTENSIONS = {".emf", ".wmf"}
+IMAGE_ASSET_SUFFIXES = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif",
+    ".emf", ".wmf", ".svg",
+}
 
 DOCX_NS = {
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
@@ -164,6 +176,59 @@ def _image_size(path: Path) -> tuple[int | None, int | None]:
 def _is_office_vector(ext: str) -> bool:
     """Return whether an extension is an Office vector preview format."""
     return ext.lower() in OFFICE_VECTOR_EXTENSIONS
+
+
+def _write_generic_image_manifest(
+    media_dir: Path,
+    rel_media_dir: str,
+    markdown: str,
+    source_kind: str,
+) -> None:
+    """Write lightweight image metadata for non-DOCX converter paths."""
+    if not media_dir.exists():
+        return
+
+    ref_pattern = re.compile(rf"{re.escape(rel_media_dir)}/([^)\s]+)")
+    refs = [Path(match.group(1)).name for match in ref_pattern.finditer(markdown)]
+    occurrence_map: dict[str, list[dict[str, object]]] = {}
+    for index, filename in enumerate(refs, 1):
+        occurrence_map.setdefault(filename, []).append({
+            "occurrence_index": index,
+            "source_ref": f"{rel_media_dir}/{filename}",
+        })
+
+    manifest: list[dict[str, object]] = []
+    for file_path in sorted(path for path in media_dir.iterdir() if path.is_file()):
+        ext = _normalize_ext(file_path.suffix)
+        if ext not in IMAGE_ASSET_SUFFIXES:
+            continue
+        width, height = _image_size(file_path)
+        ratio = width / height if width and height else None
+        asset_kind = "office_vector" if _is_office_vector(ext) else "bitmap"
+        occurrences = occurrence_map.get(file_path.name, [])
+        entry: dict[str, object] = {
+            "index": len(manifest) + 1,
+            "filename": file_path.name,
+            "original_filename": file_path.name,
+            "asset_kind": asset_kind,
+            "svg_renderable": asset_kind != "office_vector",
+            "pptx_native_supported": True,
+            "source_kind": source_kind,
+            "source_ext": ext,
+            "pixel_width": width,
+            "pixel_height": height,
+            "pixel_ratio": round(ratio, 6) if ratio else None,
+            "display_ratio": round(ratio, 6) if ratio else None,
+            "occurrences": occurrences,
+            "usage_count": len(occurrences) if occurrences else 1,
+        }
+        manifest.append(entry)
+
+    if manifest:
+        (media_dir / "image_manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
 
 def _local_name(elem: ET.Element) -> str:
@@ -829,6 +894,7 @@ def _convert_html(input_file: Path, out_file: Path) -> str:
     # Collapse 3+ blank lines to 2 for tidier output
     markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip() + "\n"
     out_file.write_text(markdown, encoding="utf-8")
+    _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "html_image")
 
     if not any(media_dir.iterdir()):
         media_dir.rmdir()
@@ -1024,6 +1090,7 @@ def _convert_epub(input_file: Path, out_file: Path) -> str:
     markdown = markdownify(combined_html, heading_style="ATX", bullets="-")
     markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip() + "\n"
     out_file.write_text(markdown, encoding="utf-8")
+    _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "epub_image")
 
     if not any(media_dir.iterdir()):
         media_dir.rmdir()
@@ -1089,6 +1156,7 @@ def _convert_ipynb(input_file: Path, out_file: Path) -> str:
 
     markdown = out_file.read_text(encoding="utf-8") if out_file.exists() else body
     media_dir = out_file.parent / rel_media_dir
+    _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "ipynb_image")
     _report_result(out_file, media_dir if media_dir.exists() else None)
     return markdown
 
@@ -1156,6 +1224,7 @@ def _convert_with_pandoc(input_file: Path, out_file: Path, suffix: str) -> str:
 
     markdown = _html_img_to_md(markdown)
     out_file.write_text(markdown, encoding="utf-8")
+    _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "pandoc_image")
 
     _report_result(out_file, media_dir if media_dir.exists() else None)
     return markdown

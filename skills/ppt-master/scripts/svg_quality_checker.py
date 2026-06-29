@@ -16,8 +16,12 @@ import json
 import html
 from pathlib import Path
 from typing import List, Dict, Tuple
-from collections import defaultdict
+from collections import Counter, defaultdict
 from xml.etree import ElementTree as ET
+
+from console_encoding import configure_utf8_stdio
+
+configure_utf8_stdio()
 
 try:
     from project_utils import CANVAS_FORMATS
@@ -217,6 +221,8 @@ class SVGQualityChecker:
         # severity is 'error' or 'warning'. Printed in print_summary.
         self._template_issues: List[Tuple[str, str, str]] = []
         self._animation_issues: List[Tuple[str, str]] = []
+        self._illustration_issues: List[Tuple[str, str, str]] = []
+        self._aggregate_counts_applied = False
 
     def check_file(self, svg_file: str, expected_format: str = None) -> Dict:
         """
@@ -264,31 +270,34 @@ class SVGQualityChecker:
                 # 2. Check forbidden elements
                 self._check_forbidden_elements(content, result)
 
-                # 3. Check fonts
+                # 3. Check font-size values
+                self._check_font_size_values(content, result)
+
+                # 4. Check fonts
                 self._check_fonts(content, result)
 
-                # 4. Check width/height consistency with viewBox
+                # 5. Check width/height consistency with viewBox
                 self._check_dimensions(content, result)
 
-                # 5. Check text wrapping methods
+                # 6. Check text wrapping methods
                 self._check_text_elements(content, result)
 
-                # 6. Check image references (file existence and resolution)
+                # 7. Check image references (file existence and resolution)
                 self._check_image_references(content, svg_path, result)
 
-                # 7. Check object-level animation anchor quality.
+                # 8. Check object-level animation anchor quality.
                 self._check_animation_group_ids(content, result)
 
-                # 7b. Check <pattern> elements declare a PPTX preset.
+                # 8b. Check <pattern> elements declare a PPTX preset.
                 self._check_pattern_fills(content, result)
 
-                # 8. Check spec_lock drift (colors / font-family / font-size).
+                # 9. Check spec_lock drift (colors / font-family / font-size).
                 #    Templates do not ship a spec_lock.md, so skip in template
                 #    mode to avoid noise.
                 if not self.template_mode:
                     self._check_spec_lock_drift(content, svg_path, result)
 
-                # 9. Check web-sourced image attribution. Templates don't carry
+                # 10. Check web-sourced image attribution. Templates don't carry
                 #    image_sources.json; skip in template mode.
                 if not self.template_mode:
                     self._check_sourced_image_attribution(content, svg_path, result)
@@ -460,6 +469,31 @@ class SVGQualityChecker:
         if re.search(r'<image[^>]*\sopacity\s*=', content_lower):
             result['errors'].append("Detected forbidden <image opacity> (use overlay mask approach)")
 
+    def _check_font_size_values(self, content: str, result: Dict):
+        """Require font-size values to be unitless numeric SVG px values."""
+        numeric_re = re.compile(r'^(?:\d+(?:\.\d+)?|\.\d+)$')
+        bad_values = set()
+
+        for match in re.finditer(r'\bfont-size\s*=\s*(["\'])(.*?)\1', content, re.IGNORECASE):
+            raw = match.group(2).strip()
+            if not numeric_re.fullmatch(raw):
+                bad_values.add(raw)
+
+        for match in re.finditer(r'\bfont-size\s*:\s*([^;"\']+)', content, re.IGNORECASE):
+            raw = match.group(1).strip()
+            if not numeric_re.fullmatch(raw):
+                bad_values.add(raw)
+
+        if bad_values:
+            shown_values = sorted(bad_values)
+            shown = ', '.join(shown_values[:5])
+            more = len(shown_values) - 5
+            suffix = f" (+{more} more)" if more > 0 else ""
+            result['errors'].append(
+                f"font-size must be a unitless numeric px value; found {shown}{suffix}. "
+                "Write e.g. font-size=\"28\", never font-size=\"28px\" or \"21pt\"."
+            )
+
     def _check_fonts(self, content: str, result: Dict):
         """Check font usage.
 
@@ -544,6 +578,66 @@ class SVGQualityChecker:
             result['warnings'].append(
                 f"Detected {len(text_matches)} potentially overly long single-line text(s) (consider using tspan for wrapping)"
             )
+
+        self._check_unmergeable_leading_text(content, result)
+
+    def _check_unmergeable_leading_text(self, content: str, result: Dict) -> None:
+        """Warn when leading text cannot be normalized for paragraph merging."""
+        try:
+            root = ET.fromstring(content)
+        except ET.ParseError:
+            return
+
+        risky = []
+        for text_el in root.iter(f'{{{SVG_NS}}}text'):
+            if not (text_el.text or "").strip():
+                continue
+            children = list(text_el)
+            if not any(self._is_line_tspan(child) for child in children):
+                continue
+
+            reason = self._leading_text_normalizer_reject_reason(text_el)
+            if reason is not None:
+                risky.append(reason)
+
+        if risky:
+            sample = '; '.join(risky[:3])
+            suffix = '' if len(risky) <= 3 else f"; +{len(risky) - 3} more"
+            result['warnings'].append(
+                "Detected multi-line <text> with leading direct text that cannot "
+                f"be normalized for PPT paragraph merging ({sample}{suffix})"
+            )
+
+    @staticmethod
+    def _is_tspan(elem: ET.Element) -> bool:
+        return elem.tag == f'{{{SVG_NS}}}tspan'
+
+    @classmethod
+    def _is_line_tspan(cls, elem: ET.Element) -> bool:
+        if not cls._is_tspan(elem):
+            return False
+        if elem.get('x') is not None or elem.get('y') is not None:
+            return True
+        dy = elem.get('dy')
+        if dy is None:
+            return False
+        try:
+            return float(re.match(r'^[\s,]*([+-]?(?:\d+\.?\d*|\d*\.\d+))', dy).group(1)) != 0
+        except (AttributeError, ValueError):
+            return True
+
+    @classmethod
+    def _leading_text_normalizer_reject_reason(cls, text_el: ET.Element) -> str | None:
+        if text_el.get('x') is None:
+            return '<text> has no x anchor'
+
+        for child in list(text_el):
+            if not cls._is_tspan(child):
+                return '<text> has non-tspan child'
+            if (child.tail or "").strip():
+                return '<tspan> has non-empty tail text'
+
+        return None
 
     def _check_image_references(self, content: str, svg_path: Path, result: Dict):
         """Check image file existence and resolution vs display size."""
@@ -734,6 +828,22 @@ class SVGQualityChecker:
                 allowed_colors.add(v.upper())
 
         typo = lock.get('typography', {})
+        numeric_size_re = re.compile(r'^(?:\d+(?:\.\d+)?|\.\d+)$')
+        invalid_lock_sizes = []
+        for k, v in typo.items():
+            if k == 'font_family' or k.endswith('_family'):
+                continue
+            if not numeric_size_re.fullmatch(v.strip()):
+                invalid_lock_sizes.append(f"{k}: {v}")
+        if invalid_lock_sizes:
+            shown = ', '.join(invalid_lock_sizes[:5])
+            more = len(invalid_lock_sizes) - 5
+            suffix = f" (+{more} more)" if more > 0 else ""
+            result['errors'].append(
+                f"spec_lock typography sizes must be unitless numeric px values; "
+                f"found {shown}{suffix}."
+            )
+
         # Font families: default `font_family` plus any per-role `*_family`
         # override (title_family / body_family / emphasis_family / code_family,
         # per spec_lock_reference.md). Any of these is a legitimate declared
@@ -789,8 +899,10 @@ class SVGQualityChecker:
                      else RAMP_MAX_RATIO)
 
         size_drifts = set()
+        used_sizes = []
         for m in re.finditer(r'font-size\s*=\s*["\']([^"\']+)["\']', content):
             val = self._normalize_size(m.group(1))
+            used_sizes.append(val)
             if not allowed_sizes or val in allowed_sizes:
                 continue
             # Intermediate values are allowed when they sit inside the ramp
@@ -803,6 +915,10 @@ class SVGQualityChecker:
                 except ValueError:
                     pass
             size_drifts.add(val)
+
+        template_size_drift = self._detect_template_size_drift(
+            used_sizes, allowed_sizes, body_px
+        )
 
         # Record in run-wide aggregation
         fname = svg_path.name
@@ -826,6 +942,72 @@ class SVGQualityChecker:
                 f"spec_lock drift: {', '.join(parts)} not in spec_lock.md "
                 "(see drift summary for details)"
             )
+        if template_size_drift:
+            result['warnings'].append(template_size_drift)
+
+    def _detect_template_size_drift(self, used_sizes, allowed_sizes, body_px):
+        """Warn when template-like small sizes bypass the locked type ramp.
+
+        The normal drift check deliberately permits in-ramp feature sizes, so
+        it should not hard-fail valid hero numbers or one-off labels. This
+        warning targets the common executor failure mode: copying a template's
+        compact 12/15/16px text stack instead of mapping content roles to
+        spec_lock typography, then reflowing from those locked px values.
+        """
+        if not allowed_sizes or not body_px or body_px <= 0:
+            return None
+
+        try:
+            declared_min = min(float(v) for v in allowed_sizes)
+        except ValueError:
+            declared_min = None
+
+        # Stay narrow on purpose: real decks carry legitimate undeclared
+        # sub-body sizes (intermediate levels, labels, emphasis) just below the
+        # locked body, so "any size < body" floods the warning and destroys its
+        # credibility. Only flag values that read as genuine template leftovers
+        # — at or below `body * 0.75`, or below the smallest declared slot. This
+        # under-warns (a stray 15/16 against a body of 18 can slip through) in
+        # exchange for not crying wolf on valid intermediate type.
+        template_like_limit = body_px * 0.75
+        template_like_sub_body = []
+        for raw in used_sizes:
+            if raw in allowed_sizes:
+                continue
+            try:
+                size = float(raw)
+            except (TypeError, ValueError):
+                continue
+            below_declared_floor = declared_min is not None and size < declared_min
+            if size <= template_like_limit or below_declared_floor:
+                template_like_sub_body.append(raw)
+
+        if not template_like_sub_body:
+            return None
+
+        counts = Counter(template_like_sub_body)
+        distinct = sorted(counts, key=lambda v: float(v))
+        repeated_total = sum(counts.values())
+
+        below_declared_floor = []
+        if declared_min is not None:
+            below_declared_floor = [v for v in distinct if float(v) < declared_min]
+
+        if len(distinct) < 2 and repeated_total < 4 and not below_declared_floor:
+            return None
+
+        sample = ', '.join(
+            f"{v}x{counts[v]}" if counts[v] > 1 else v
+            for v in distinct[:5]
+        )
+        more = len(distinct) - 5
+        suffix = f" (+{more} more)" if more > 0 else ""
+        return (
+            "possible template font-size drift: undeclared sub-body size(s) "
+            f"{sample}{suffix}. Map each text item to a spec_lock typography "
+            "role first, then reflow card height / y / dy / line-height from "
+            "the locked px values."
+        )
 
     def _find_image_sources_manifest(self, svg_path: Path) -> Path | None:
         """Locate image_sources.json for a project SVG.
@@ -893,9 +1075,12 @@ class SVGQualityChecker:
 
     @staticmethod
     def _normalize_size(value: str) -> str:
-        """Normalize a font-size value for comparison: lowercase, strip spaces,
-        strip trailing 'px'. Other units (em / rem / %) are kept as-is so that
-        e.g. '1.5em' vs '24' stay distinct."""
+        """Normalize a font-size value for drift comparison.
+
+        Unit-bearing SVG values are reported as errors before drift checking.
+        The legacy `px` strip remains to avoid a duplicate drift warning after
+        the hard error has already identified the unit problem.
+        """
         v = value.strip().lower()
         if v.endswith('px'):
             v = v[:-2].strip()
@@ -984,8 +1169,375 @@ class SVGQualityChecker:
             self._check_template_contract(dir_path, svg_files)
         elif dir_path.is_dir():
             self._check_animation_config_contract(dir_path)
+            self._check_illustration_resource_contract(dir_path)
 
         return self.results
+
+    def _check_illustration_resource_contract(self, dir_path: Path) -> None:
+        """Project-level illustration resource checks."""
+        project_path = self._resolve_project_path(dir_path)
+        spec_path = project_path / 'design_spec.md'
+        if not spec_path.exists():
+            return
+
+        try:
+            spec_text = spec_path.read_text(encoding='utf-8')
+        except OSError as exc:
+            self._illustration_issues.append((
+                'warning',
+                'spec_unreadable',
+                f"could not read {spec_path}: {exc}",
+            ))
+            return
+
+        rows = self._extract_image_resource_rows(spec_text)
+        if not rows:
+            return
+
+        lock_images = self._load_project_lock_images(project_path)
+        svg_texts = self._load_project_svg_texts(project_path)
+        all_svg_text = "\n".join(svg_texts.values())
+
+        sheet_rows = [row for row in rows if self._row_type(row).lower() == 'illustration sheet']
+        slice_rows = [row for row in rows if self._row_acquire(row) == 'slice']
+        image_rows = [
+            row for row in rows
+            if self._row_acquire(row) in {'ai', 'web', 'user', 'placeholder', 'slice'}
+            and self._row_type(row).lower() not in {'latex formula', 'illustration sheet'}
+        ]
+
+        for row in sheet_rows:
+            filename = self._row_filename(row)
+            if not filename:
+                continue
+            if filename in lock_images:
+                self._illustration_issues.append((
+                    'error',
+                    'sheet_in_lock',
+                    f"{filename} is an Illustration Sheet but is listed in spec_lock.md images; "
+                    "only sliced element rows may be listed.",
+                ))
+            if filename in all_svg_text:
+                self._illustration_issues.append((
+                    'error',
+                    'sheet_referenced',
+                    f"{filename} is an Illustration Sheet but is referenced by an SVG; "
+                    "generate it only as a slice source, never place it.",
+                ))
+
+        for row in slice_rows:
+            filename = self._row_filename(row)
+            if not filename:
+                continue
+            if filename not in lock_images:
+                self._illustration_issues.append((
+                    'error',
+                    'slice_missing_lock',
+                    f"{filename} is a slice row but is absent from spec_lock.md images.",
+                ))
+            if (
+                self._row_status(row) == 'generated'
+                and not (project_path / 'images' / filename).exists()
+            ):
+                self._illustration_issues.append((
+                    'error',
+                    'slice_file_missing',
+                    f"{filename} is a Generated slice row but images/{filename} does not exist.",
+                ))
+
+        has_coverage_note = 'Image-as-canvas' in spec_text or 'image-as-canvas' in spec_text
+        pattern_ids = self._collect_layout_pattern_ids(image_rows)
+        if len(image_rows) >= 4 and not any(38 <= pid <= 46 for pid in pattern_ids):
+            if not has_coverage_note:
+                self._illustration_issues.append((
+                    'warning',
+                    'missing_image_as_canvas',
+                    "deck has 4+ image-bearing rows but no #38-#46 image-as-canvas "
+                    "layout and no coverage note in design_spec.md §VIII.",
+                ))
+
+        conventional_ids = {1, 2, 3, 5, 6}
+        if len(image_rows) >= 4 and pattern_ids and pattern_ids.issubset(conventional_ids):
+            if not has_coverage_note:
+                self._illustration_issues.append((
+                    'warning',
+                    'layout_pattern_degenerated',
+                    "all image-bearing rows use only basic full-bleed / left-right / "
+                    "top-bottom patterns (#1/#2/#3/#5/#6); re-check "
+                    "references/image-layout-patterns.md for modifiers or image-as-canvas options.",
+                ))
+
+        for row in image_rows:
+            self._check_decorative_image_row(row, project_path, svg_texts)
+
+    @staticmethod
+    def _resolve_project_path(dir_path: Path) -> Path:
+        """Resolve a checker target directory to its project root."""
+        if dir_path.name in {'svg_output', 'svg_final'}:
+            return dir_path.parent
+        if (dir_path / 'svg_output').exists() or (dir_path / 'design_spec.md').exists():
+            return dir_path
+        return dir_path.parent
+
+    @staticmethod
+    def _split_md_table_row(line: str) -> List[str]:
+        """Split a simple Markdown table row into stripped cells."""
+        return [cell.strip().strip('`') for cell in line.strip().strip('|').split('|')]
+
+    @classmethod
+    def _extract_image_resource_rows(cls, spec_text: str) -> List[Dict[str, str]]:
+        """Extract rows from design_spec.md §VIII Image Resource List."""
+        section_match = re.search(
+            r"^##\s+VIII\.\s+Image Resource List\b.*?(?=^##\s+|\Z)",
+            spec_text,
+            re.MULTILINE | re.DOTALL,
+        )
+        if not section_match:
+            return []
+
+        lines = section_match.group(0).splitlines()
+        header = None
+        rows: List[Dict[str, str]] = []
+        in_resource_table = False
+        for line in lines:
+            if not line.strip().startswith('|'):
+                if in_resource_table and rows:
+                    break
+                continue
+
+            cells = cls._split_md_table_row(line)
+            if not cells:
+                continue
+            if header is None:
+                if any(cell.lower() == 'filename' for cell in cells):
+                    header = cells
+                    in_resource_table = True
+                continue
+            if set(cell.replace('-', '').strip() for cell in cells) == {''}:
+                continue
+            if not in_resource_table:
+                continue
+            row = {header[i]: cells[i] if i < len(cells) else '' for i in range(len(header))}
+            filename = row.get('Filename', '').strip()
+            if filename and filename.lower() != 'filename':
+                rows.append(row)
+
+        return rows
+
+    @staticmethod
+    def _row_filename(row: Dict[str, str]) -> str:
+        return Path(row.get('Filename', '').strip()).name
+
+    @staticmethod
+    def _row_type(row: Dict[str, str]) -> str:
+        return row.get('Type', '').strip()
+
+    @staticmethod
+    def _row_acquire(row: Dict[str, str]) -> str:
+        return row.get('Acquire Via', '').strip().lower()
+
+    @staticmethod
+    def _row_status(row: Dict[str, str]) -> str:
+        return row.get('Status', '').strip().lower()
+
+    @staticmethod
+    def _row_layout(row: Dict[str, str]) -> str:
+        return row.get('Layout pattern', '').strip()
+
+    @staticmethod
+    def _collect_layout_pattern_ids(rows: List[Dict[str, str]]) -> set[int]:
+        ids: set[int] = set()
+        for row in rows:
+            for match in re.finditer(r'#(\d+)\b', SVGQualityChecker._row_layout(row)):
+                ids.add(int(match.group(1)))
+        return ids
+
+    def _load_project_lock_images(self, project_path: Path) -> set[str]:
+        """Return filenames listed under spec_lock.md images."""
+        lock_path = project_path / 'spec_lock.md'
+        if _parse_spec_lock is None or not lock_path.exists():
+            return set()
+        try:
+            lock = _parse_spec_lock(lock_path)
+        except Exception:
+            return set()
+        images = set()
+        for value in lock.get('images', {}).values():
+            path_part = value.split('|', 1)[0].strip()
+            images.add(Path(path_part).name)
+        return images
+
+    @staticmethod
+    def _load_project_svg_texts(project_path: Path) -> Dict[Path, str]:
+        """Read project SVG output files for project-level cross-checks."""
+        svg_dir = project_path / 'svg_output'
+        if not svg_dir.exists():
+            return {}
+        out: Dict[Path, str] = {}
+        for svg_path in sorted(svg_dir.glob('*.svg')):
+            try:
+                out[svg_path] = svg_path.read_text(encoding='utf-8')
+            except OSError:
+                continue
+        return out
+
+    def _check_decorative_image_row(
+        self,
+        row: Dict[str, str],
+        project_path: Path,
+        svg_texts: Dict[Path, str],
+    ) -> None:
+        """Warn when decorative image patterns lack obvious SVG/file evidence."""
+        filename = self._row_filename(row)
+        if not filename:
+            return
+        layout = self._row_layout(row)
+        ids = {int(match.group(1)) for match in re.finditer(r'#(\d+)\b', layout)}
+        decorative_ids = ids & {4, 58, 63, 66, 69}
+        if not decorative_ids:
+            return
+        if self._row_type(row).lower() == 'illustration sheet':
+            return
+
+        referenced_tags: List[Tuple[Path, str]] = []
+        for svg_path, content in svg_texts.items():
+            for tag in re.findall(r'<image\b[^>]*>', content, re.IGNORECASE):
+                if filename in tag:
+                    referenced_tags.append((svg_path, tag))
+
+        if 63 in decorative_ids:
+            if Path(filename).suffix.lower() != '.png':
+                self._illustration_issues.append((
+                    'warning',
+                    'sticker_not_png',
+                    f"{filename} uses #63 transparent sticker / cutout but is not a PNG.",
+                ))
+            elif not self._png_has_alpha(project_path / 'images' / filename):
+                self._illustration_issues.append((
+                    'warning',
+                    'sticker_no_alpha',
+                    f"{filename} uses #63 transparent sticker / cutout but the PNG "
+                    "does not appear to have an alpha channel.",
+                ))
+
+        if not referenced_tags:
+            return
+
+        if 69 in decorative_ids and not any('rotate(' in tag for _path, tag in referenced_tags):
+            self._illustration_issues.append((
+                'warning',
+                'rotation_missing',
+                f"{filename} declares #69 slight rotation but no referenced <image> "
+                "tag contains rotate(...).",
+            ))
+
+        if 4 in decorative_ids and not self._has_off_canvas_reference(referenced_tags):
+            self._illustration_issues.append((
+                'warning',
+                'edge_bleed_missing',
+                f"{filename} declares #4 edge bleed but no referenced <image> appears "
+                "to extend past the canvas edge.",
+            ))
+
+        if 58 in decorative_ids and not self._has_corner_fragment_reference(referenced_tags):
+            self._illustration_issues.append((
+                'warning',
+                'corner_fragment_missing',
+                f"{filename} declares #58 decorative corner fragment but no referenced "
+                "<image> appears near a canvas corner.",
+            ))
+
+        if 66 in decorative_ids:
+            content_scope = "\n".join(svg_texts.get(path, '') for path, _tag in referenced_tags)
+            if '<linearGradient' not in content_scope and 'opacity' not in content_scope:
+                self._illustration_issues.append((
+                    'warning',
+                    'fade_missing',
+                    f"{filename} declares #66 fade into background but the referencing "
+                    "SVG has no obvious gradient or opacity treatment.",
+                ))
+
+    @staticmethod
+    def _png_has_alpha(path: Path) -> bool:
+        """Return True when a PNG appears to carry transparent pixels."""
+        if not path.exists():
+            return False
+        try:
+            from PIL import Image as PILImage
+            with PILImage.open(path) as img:
+                if img.mode in {'RGBA', 'LA'}:
+                    alpha = img.getchannel('A')
+                    return alpha.getextrema()[0] < 255
+                return 'transparency' in img.info
+        except (ImportError, OSError, ValueError):
+            return False
+
+    @staticmethod
+    def _parse_image_geometry(tag: str) -> Tuple[float, float, float, float] | None:
+        """Extract x/y/width/height from an <image> tag."""
+        values = {}
+        for attr in ('x', 'y', 'width', 'height'):
+            match = re.search(rf'\b{attr}\s*=\s*["\']([^"\']+)["\']', tag)
+            if not match:
+                return None
+            try:
+                values[attr] = float(match.group(1))
+            except ValueError:
+                return None
+        return values['x'], values['y'], values['width'], values['height']
+
+    @staticmethod
+    def _parse_svg_viewbox(content: str) -> Tuple[float, float] | None:
+        """Return viewBox width/height from SVG content."""
+        match = re.search(r'viewBox="[^"]*?\s+([0-9.]+)\s+([0-9.]+)"', content)
+        if not match:
+            return None
+        try:
+            return float(match.group(1)), float(match.group(2))
+        except ValueError:
+            return None
+
+    @classmethod
+    def _has_off_canvas_reference(cls, refs: List[Tuple[Path, str]]) -> bool:
+        for svg_path, tag in refs:
+            geometry = cls._parse_image_geometry(tag)
+            if geometry is None:
+                continue
+            x, y, width, height = geometry
+            try:
+                content = svg_path.read_text(encoding='utf-8')
+            except OSError:
+                continue
+            viewbox = cls._parse_svg_viewbox(content)
+            if viewbox is None:
+                continue
+            vb_width, vb_height = viewbox
+            if x < 0 or y < 0 or x + width > vb_width or y + height > vb_height:
+                return True
+        return False
+
+    @classmethod
+    def _has_corner_fragment_reference(cls, refs: List[Tuple[Path, str]]) -> bool:
+        for svg_path, tag in refs:
+            geometry = cls._parse_image_geometry(tag)
+            if geometry is None:
+                continue
+            x, y, width, height = geometry
+            try:
+                content = svg_path.read_text(encoding='utf-8')
+            except OSError:
+                continue
+            viewbox = cls._parse_svg_viewbox(content)
+            if viewbox is None:
+                continue
+            vb_width, vb_height = viewbox
+            near_left = x <= 40
+            near_top = y <= 40
+            near_right = x + width >= vb_width - 40
+            near_bottom = y + height >= vb_height - 40
+            if (near_left or near_right) and (near_top or near_bottom):
+                return True
+        return False
 
     def _check_animation_config_contract(self, dir_path: Path) -> None:
         """Project-level animations.json reference checks."""
@@ -1264,6 +1816,8 @@ class SVGQualityChecker:
 
     def print_summary(self):
         """Print check summary"""
+        self._apply_aggregated_issue_counts()
+
         print("=" * 80)
         print("[SUMMARY] Check Summary")
         print("=" * 80)
@@ -1290,6 +1844,9 @@ class SVGQualityChecker:
         # Animation config aggregation.
         self._print_animation_summary()
 
+        # Illustration strategy aggregation.
+        self._print_illustration_summary()
+
         # Fix suggestions
         if self.summary['errors'] > 0 or self.summary['warnings'] > 0:
             print(f"\n[TIP] Common fixes:")
@@ -1305,16 +1862,30 @@ class SVGQualityChecker:
 
         errors = [item for item in self._animation_issues if item[0] == 'error']
         warnings = [item for item in self._animation_issues if item[0] == 'warning']
-        self.summary['errors'] += len(errors)
-        self.summary['warnings'] += len(warnings)
-        for severity, _msg in self._animation_issues:
-            self.issue_types[f'animation_config_{severity}'] += 1
 
         print("\n[ANIMATION] animations.json checks")
         for _severity, msg in errors:
             print(f"  [ERROR] {msg}")
         for _severity, msg in warnings:
             print(f"  [WARN] {msg}")
+
+    def _print_illustration_summary(self):
+        """Print project-level illustration strategy issues if present."""
+        if not self._illustration_issues:
+            return
+
+        errors = [item for item in self._illustration_issues if item[0] == 'error']
+        warnings = [item for item in self._illustration_issues if item[0] == 'warning']
+
+        print("\n[ILLUSTRATION] Illustration strategy checks")
+        if errors:
+            print(f"  Errors ({len(errors)}):")
+            for _severity, kind, msg in errors:
+                print(f"    [{kind}] {msg}")
+        if warnings:
+            print(f"  Warnings ({len(warnings)}):")
+            for _severity, kind, msg in warnings:
+                print(f"    [{kind}] {msg}")
 
     def _print_template_summary(self):
         """Aggregate template-mode roster / placeholder issues at the bottom.
@@ -1329,13 +1900,6 @@ class SVGQualityChecker:
         errors = [item for item in self._template_issues if item[0] == 'error']
         warnings = [item for item in self._template_issues if item[0] == 'warning']
 
-        # Mirror into the global summary so downstream "0 errors" gates honor
-        # template-mode issues.
-        self.summary['errors'] += len(errors)
-        self.summary['warnings'] += len(warnings)
-        for severity, kind, _msg in self._template_issues:
-            self.issue_types[f"template_{kind}"] += 1
-
         print("\n[TEMPLATE] Template mode checks")
         if errors:
             print(f"  Errors ({len(errors)}):")
@@ -1348,6 +1912,33 @@ class SVGQualityChecker:
         if not errors:
             print("  No structural roster issues. Placeholder hints above are advisory only;")
             print("  declare 'placeholders:' frontmatter in design_spec.md to silence them.")
+
+    def _apply_aggregated_issue_counts(self):
+        """Mirror project-level aggregate issues into summary counters once."""
+        if self._aggregate_counts_applied:
+            return
+        self._aggregate_counts_applied = True
+
+        animation_errors = [item for item in self._animation_issues if item[0] == 'error']
+        animation_warnings = [item for item in self._animation_issues if item[0] == 'warning']
+        self.summary['errors'] += len(animation_errors)
+        self.summary['warnings'] += len(animation_warnings)
+        for severity, _msg in self._animation_issues:
+            self.issue_types[f'animation_config_{severity}'] += 1
+
+        template_errors = [item for item in self._template_issues if item[0] == 'error']
+        template_warnings = [item for item in self._template_issues if item[0] == 'warning']
+        self.summary['errors'] += len(template_errors)
+        self.summary['warnings'] += len(template_warnings)
+        for severity, kind, _msg in self._template_issues:
+            self.issue_types[f'template_{kind}_{severity}'] += 1
+
+        illustration_errors = [item for item in self._illustration_issues if item[0] == 'error']
+        illustration_warnings = [item for item in self._illustration_issues if item[0] == 'warning']
+        self.summary['errors'] += len(illustration_errors)
+        self.summary['warnings'] += len(illustration_warnings)
+        for severity, kind, _msg in self._illustration_issues:
+            self.issue_types[f'illustration_{kind}_{severity}'] += 1
 
     def _print_drift_summary(self):
         """Print spec_lock drift aggregation if any was observed.
@@ -1388,7 +1979,7 @@ class SVGQualityChecker:
         """Calculate percentage"""
         if self.summary['total'] == 0:
             return 0
-        return int(count / self.summary['total'] * 100)
+        return min(100, int(count / self.summary['total'] * 100))
 
     def export_report(self, output_file: str = 'svg_quality_report.txt'):
         """Export check report"""

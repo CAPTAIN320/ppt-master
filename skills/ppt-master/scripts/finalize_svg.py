@@ -39,6 +39,10 @@ import shutil
 import argparse
 from pathlib import Path
 
+from console_encoding import configure_utf8_stdio
+
+configure_utf8_stdio()
+
 # Import finalize helpers from the internal package.
 sys.path.insert(0, str(Path(__file__).parent))
 from svg_finalize.align_embed_images import (
@@ -114,8 +118,9 @@ def finalize_project(
     options: dict[str, bool],
     dry_run: bool = False,
     quiet: bool = False,
-    compress: bool = False,
-    max_dimension: int | None = None,
+    compress: bool = True,
+    max_dimension: int | None = 2560,
+    image_scale: float = 2.0,
 ) -> bool:
     """
     Finalize SVG files in the project
@@ -127,10 +132,16 @@ def finalize_project(
         quiet: Quiet mode, reduce output
         compress: Compress images before embedding
         max_dimension: Downscale images exceeding this dimension
+        image_scale: Target image pixels per SVG display pixel
     """
     svg_output = project_dir / 'svg_output'
     svg_final = project_dir / 'svg_final'
-    icons_dir = Path(__file__).parent.parent / 'templates' / 'icons'
+    # Project-first: embed from the deck's own icons/ (synced library icons +
+    # any custom icons), falling back to the global library per-icon.
+    global_icons_dir = Path(__file__).parent.parent / 'templates' / 'icons'
+    project_icons_dir = project_dir / 'icons'
+    icons_dir = project_icons_dir if project_icons_dir.is_dir() else global_icons_dir
+    icons_fallback_dir = global_icons_dir if icons_dir != global_icons_dir else None
 
     # Check if svg_output exists
     if not svg_output.exists():
@@ -166,7 +177,7 @@ def finalize_project(
             safe_print("[1/4] Embedding icons...")
         icons_count = 0
         for svg_file in svg_final.glob('*.svg'):
-            count = embed_icons_in_file(svg_file, icons_dir, dry_run=False, verbose=False)
+            count = embed_icons_in_file(svg_file, icons_dir, dry_run=False, verbose=False, fallback_dir=icons_fallback_dir)
             icons_count += count
         if not quiet:
             if icons_count > 0:
@@ -194,6 +205,7 @@ def finalize_project(
                 verbose=False,
                 compress=compress,
                 max_dimension=max_dimension,
+                image_scale=image_scale,
             )
             img_count += count
             img_errors += errs
@@ -295,10 +307,14 @@ Aliases (still accepted):
                         help='Preview only, do not execute')
     parser.add_argument('--quiet', '-q', action='store_true',
                         help='Quiet mode, reduce output')
-    parser.add_argument('--compress', action='store_true',
-                        help='Compress images before embedding (JPEG quality=85, PNG optimize)')
-    parser.add_argument('--max-dimension', type=int, default=None,
-                        help='Downscale images exceeding this dimension on either axis (e.g., 2560)')
+    parser.add_argument('--compress', dest='compress', action='store_true', default=True,
+                        help='Compress images before embedding (default)')
+    parser.add_argument('--no-compress', dest='compress', action='store_false',
+                        help='Disable image compression before embedding')
+    parser.add_argument('--max-dimension', type=int, default=2560,
+                        help='Downscale images exceeding this dimension on either axis (default: 2560)')
+    parser.add_argument('--image-scale', type=float, default=2.0,
+                        help='Target image pixels per SVG display pixel (default: 2.0)')
 
     args = parser.parse_args()
 
@@ -328,9 +344,17 @@ Aliases (still accepted):
             'fix_rounded': True,
         }
 
+    if args.max_dimension < 1:
+        safe_print("[ERROR] --max-dimension must be >= 1")
+        sys.exit(1)
+    if args.image_scale < 1:
+        safe_print("[ERROR] --image-scale must be >= 1")
+        sys.exit(1)
+
     success = finalize_project(args.project_dir, options, args.dry_run, args.quiet,
                                compress=args.compress,
-                               max_dimension=args.max_dimension)
+                               max_dimension=args.max_dimension,
+                               image_scale=args.image_scale)
     sys.exit(0 if success else 1)
 
 

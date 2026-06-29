@@ -299,7 +299,7 @@ Must be executed in order — skipping or adding extra flags is FORBIDDEN:
 # 1. Split speaker notes into per-page note files
 python3 scripts/total_md_split.py <project_path>
 
-# 2. SVG post-processing (icon embedding, image crop/embed, text flattening, rounded rect to path)
+# 2. SVG post-processing (icon embedding, image crop/embed/optimization, text flattening, rounded rect to path)
 python3 scripts/finalize_svg.py <project_path>
 
 # 3. Export PPTX (embeds speaker notes by default)
@@ -314,7 +314,7 @@ python3 scripts/svg_to_pptx.py <project_path>
 
 **Optional animation flags** (only when the user asks):
 - `-t <effect>` — page transition (`fade` / `push` / `wipe` / `split` / `strips` / `cover` / `random` / `none`; default `fade`)
-- `-a <effect>` — per-element entrance animation (`fade` / `auto` / `mixed` / `random` / one of 22 named effects / `none`; default `auto`, maps effect from group id — image-like ids cycle zoom/dissolve/circle/box/diamond/wheel, other matches map to a single effect, unmatched ids cycle fade/wipe/fly/zoom). Anchors on top-level `<g id="...">` groups.
+- `-a <effect>` — per-element entrance animation (`fade` / `auto` / `mixed` / `random` / one of 22 named effects / `none`; **default `none`** — pages appear as a whole, no auto element builds; opt in with `auto`, which maps effect from group id — image-like ids cycle zoom/dissolve/circle/box/diamond/wheel, other matches map to a single effect, unmatched ids cycle fade/wipe/fly/zoom). Anchors on top-level `<g id="...">` groups.
 - `--animation-trigger {on-click,with-previous,after-previous}` — Start mode matching PowerPoint's animation-pane Start dropdown. Default `after-previous` (cascade on slide entry; pace via `--animation-stagger <seconds>`); `on-click` advances per click; `with-previous` plays all groups together.
 - `--animation-config <path>` — optional object-level animation sidecar. Default: `<project>/animations.json` when present.
 - `--auto-advance <seconds>` — kiosk-style auto-play
@@ -339,7 +339,9 @@ Full reference: [`animations.md`](animations.md).
 - NEVER force `-s output` for the legacy/preview pptx (PowerPoint's internal SVG parser drops icons and rounded corners). Default auto-split already gives native the high-fidelity source it needs without affecting legacy.
 - NEVER use `--only` (it suppresses one of the two output files)
 
-> Source-directory split: by default `svg_to_pptx.py` reads `svg_output/` for the native pptx (preserves icon `<use>`, image `preserveAspectRatio` → `srcRect`, rounded rect `rx/ry` → `prstGeom roundRect`) and `svg_final/` for the legacy/preview pptx (PowerPoint's internal SVG parser needs the flattened form). Pass `-s output` or `-s final` only when you specifically want both products to read from a single source.
+> Source-directory split: by default `svg_to_pptx.py` reads `svg_output/` for the native pptx (preserves icon `<use>`, image `preserveAspectRatio` as native picture-crop metadata, rounded rect `rx/ry` → `prstGeom roundRect`) and `svg_final/` for the legacy/preview pptx (PowerPoint's internal SVG parser needs the flattened form). Pass `-s output` or `-s final` only when you specifically want both products to read from a single source.
+
+**Default — raster size control**: `finalize_svg.py` optimizes raster images using a rendered-size budget of `2x` display pixels with a `2560px` maximum dimension; it may crop pixels for the flattened SVG snapshot. Native `svg_to_pptx.py` defaults to `--image-sizing cap`: it downscales only oversized full source images to `--image-max-dimension 2560`, keeps display cropping as editable PPT picture-crop metadata, and does not shrink a picture merely because its current SVG placement is small. Opaque PNG photos may become JPEG; transparent assets remain PNG. Use `finalize_svg.py --no-compress` / a higher `--max-dimension` only for diagnostic SVG snapshots, `svg_to_pptx.py --no-image-optimize` only when the native PPTX must retain original image bytes, and `svg_to_pptx.py --image-sizing display --image-scale 2` only for aggressive size reduction.
 
 **Re-run rule**: Any change to `svg_output/` after post-processing requires re-running Steps 2-3. Step 1 only re-runs if `notes/total.md` changed.
 
@@ -555,7 +557,7 @@ Best for: slides needing strong visual brand identity.
 
 | Scenario | Recommended Technique | Avoid |
 |----------|-----------------------|-------|
-| Card / panel shadow (only when floating over photo/colored panel) | Filter soft shadow (`flood-opacity` 0.06–0.12, single light source) | Hard black shadow, full-page abundance |
+| Card / panel shadow (only when floating over photo/colored panel) | Filter soft shadow (`flood-opacity` 0.06–0.10, single light source) | Hard black shadow, full-page abundance |
 | Equal peer cards in a grid | All flat (no shadow) | Lifting every card uniformly |
 | Page-section background panel | Flat fill, no shadow | Treating panels as floating cards |
 | Accent / CTA button (one per page) | Colored shadow (same hue family, `flood-opacity` 0.12–0.20) | Generic gray shadow, applying to every button |
@@ -653,7 +655,9 @@ Gradients defined in `<defs>` and referenced via `fill="url(#id)"` convert to na
 
 `<pattern>` fills convert to native PPTX `<a:pattFill prst="...">` — but only PPTX's built-in preset patterns are reachable. The converter does **not** render hand-drawn `<path>` geometry inside the pattern; instead it reads two annotations off the `<pattern>` element and emits the matching DrawingML preset.
 
-**Required annotations**:
+**Prefer explicit geometry when spacing matters.** A `<pattern>` renders at PowerPoint's **fixed preset density** — you cannot reproduce a specific tile size (e.g. a 40px grid). For grids / textures whose spacing or line weight is part of the design, draw the lines as **one `<path>` with all lines as subpaths** (`M40 0V720 M80 0V720 … M0 40H1280 …`, `fill="none" stroke=…`) — the converter supports `M/L/H/V` and multi-subpath, so it becomes **one editable vector shape that reproduces the exact spacing** across all four renderers. Reserve `<pattern>` + `data-pptx-pattern` for **round-tripping an existing PPTX** (decks imported via `pptx_to_svg`), where the source genuinely used a native preset fill. For pure display where no PPT-side editing is needed, `--svg-snapshot` is the other faithful option.
+
+**Required annotations** (only when you intentionally use a `<pattern>` preset):
 
 | Attribute | Purpose | Without it |
 |---|---|---|

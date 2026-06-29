@@ -6,6 +6,7 @@ import io
 import math
 import re
 import base64
+from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -17,7 +18,8 @@ from .drawingml_utils import (
     rect_to_dml_xfrm,
     parse_hex_color, resolve_url_id, get_effective_filter_id,
     parse_font_family, is_cjk_char, estimate_text_width,
-    parse_transform_matrix, _xml_escape,
+    detect_text_lang, resolve_text_run_fonts,
+    matrix_multiply, parse_transform_matrix, transform_point, _xml_escape,
 )
 from .drawingml_styles import (
     build_solid_fill, build_gradient_fill,
@@ -30,6 +32,26 @@ from .drawingml_paths import (
 )
 
 
+def _resolve_external_image(svg_dir: Path, href: str) -> Path:
+    """Resolve a non-data-URI image href to a file on disk.
+
+    Search order: next to the SVG (``svg_output/``), the project root, the
+    project's ``images/`` (the single runtime image pool — template-bundled
+    bitmaps plus AI / web / user images all live here), then ``templates/``
+    (legacy flat-copied template assets). Raises ``FileNotFoundError`` if none
+    of these exist.
+    """
+    for candidate in (
+        svg_dir / href,
+        svg_dir.parent / href,
+        svg_dir.parent / 'images' / href,
+        svg_dir.parent / 'templates' / href,
+    ):
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f'External image not found: {href}')
+
+
 def _wrap_shape(
     shape_id: int, name: str,
     off_x: int, off_y: int,
@@ -37,16 +59,18 @@ def _wrap_shape(
     geom_xml: str, fill_xml: str, stroke_xml: str,
     effect_xml: str = '', extra_xml: str = '',
     rot: int = 0,
+    xfrm_attr: str = '',
 ) -> str:
     """Wrap DrawingML content into a <p:sp> shape element."""
     rot_attr = f' rot="{rot}"' if rot else ''
+    xfrm_attrs = f'{xfrm_attr}{rot_attr}'
     return f'''<p:sp>
 <p:nvSpPr>
 <p:cNvPr id="{shape_id}" name="{_xml_escape(name)}"/>
 <p:cNvSpPr/><p:nvPr/>
 </p:nvSpPr>
 <p:spPr>
-<a:xfrm{rot_attr}><a:off x="{off_x}" y="{off_y}"/><a:ext cx="{ext_cx}" cy="{ext_cy}"/></a:xfrm>
+<a:xfrm{xfrm_attrs}><a:off x="{off_x}" y="{off_y}"/><a:ext cx="{ext_cx}" cy="{ext_cy}"/></a:xfrm>
 {geom_xml}
 {fill_xml}
 {stroke_xml}
@@ -54,6 +78,90 @@ def _wrap_shape(
 </p:spPr>
 {extra_xml}
 </p:sp>'''
+
+
+def _context_transform_matrix(ctx: ConvertContext) -> tuple[float, float, float, float, float, float]:
+    """Return the current context as a full SVG affine matrix."""
+    if ctx.use_transform_matrix:
+        return ctx.transform_matrix
+    return (
+        ctx.scale_x, 0.0,
+        0.0, ctx.scale_y,
+        ctx.translate_x, ctx.translate_y,
+    )
+
+
+def _combined_transform_matrix(
+    ctx: ConvertContext,
+    transform: str | None,
+) -> tuple[float, float, float, float, float, float]:
+    """Compose context transform with an element-level transform attribute."""
+    matrix = _context_transform_matrix(ctx)
+    if transform:
+        matrix = matrix_multiply(matrix, parse_transform_matrix(transform))
+    return matrix
+
+
+def _uses_full_transform(ctx: ConvertContext, transform: str | None) -> bool:
+    return ctx.use_transform_matrix or bool(transform)
+
+
+def _transformed_point(
+    ctx: ConvertContext,
+    x: float,
+    y: float,
+    transform: str | None,
+) -> tuple[float, float]:
+    if _uses_full_transform(ctx, transform):
+        return transform_point(_combined_transform_matrix(ctx, transform), x, y)
+    return ctx_x(x, ctx), ctx_y(y, ctx)
+
+
+def _shape_xfrm_from_svg_rect(
+    ctx: ConvertContext,
+    raw_x: float,
+    raw_y: float,
+    raw_w: float,
+    raw_h: float,
+    resolved_x: float,
+    resolved_y: float,
+    resolved_w: float,
+    resolved_h: float,
+    transform: str | None,
+) -> tuple[str, int, int, int, int, tuple[int, int, int, int]]:
+    """Build DrawingML xfrm data for an SVG rectangle-like element."""
+    if _uses_full_transform(ctx, transform):
+        return rect_to_dml_xfrm(
+            raw_x, raw_y, raw_w, raw_h,
+            _combined_transform_matrix(ctx, transform),
+        )
+
+    off_x = px_to_emu(resolved_x)
+    off_y = px_to_emu(resolved_y)
+    ext_cx = px_to_emu(resolved_w)
+    ext_cy = px_to_emu(resolved_h)
+    return '', off_x, off_y, ext_cx, ext_cy, (off_x, off_y, off_x + ext_cx, off_y + ext_cy)
+
+
+def _transform_path_commands(
+    commands: list[PathCommand],
+    matrix: tuple[float, float, float, float, float, float],
+) -> list[PathCommand]:
+    """Apply an affine transform to normalized M/L/C/Z path commands."""
+    transformed: list[PathCommand] = []
+    for cmd in commands:
+        if cmd.cmd in ('M', 'L'):
+            x, y = transform_point(matrix, cmd.args[0], cmd.args[1])
+            transformed.append(PathCommand(cmd.cmd, [x, y]))
+        elif cmd.cmd == 'C':
+            args: list[float] = []
+            for i in range(0, 6, 2):
+                x, y = transform_point(matrix, cmd.args[i], cmd.args[i + 1])
+                args.extend([x, y])
+            transformed.append(PathCommand(cmd.cmd, args))
+        else:
+            transformed.append(cmd)
+    return transformed
 
 
 # ---------------------------------------------------------------------------
@@ -193,10 +301,14 @@ def convert_rect(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
     for now — current corpora contain none, but the branch keeps callers from
     silently producing distorted custom geometry if one ever appears.
     """
-    x = ctx_x(_f(elem.get('x')), ctx)
-    y = ctx_y(_f(elem.get('y')), ctx)
-    w = ctx_w(_f(elem.get('width')), ctx)
-    h = ctx_h(_f(elem.get('height')), ctx)
+    raw_x = _f(elem.get('x'))
+    raw_y = _f(elem.get('y'))
+    raw_w = _f(elem.get('width'))
+    raw_h = _f(elem.get('height'))
+    x = ctx_x(raw_x, ctx)
+    y = ctx_y(raw_y, ctx)
+    w = ctx_w(raw_w, ctx)
+    h = ctx_h(raw_h, ctx)
 
     if w <= 0 or h <= 0:
         return None
@@ -225,12 +337,7 @@ def convert_rect(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
     if filt_id and filt_id in ctx.defs:
         effect = build_effect_xml(ctx.defs[filt_id])
 
-    rot = 0
     transform = elem.get('transform')
-    if transform:
-        r_match = re.search(r'rotate\(\s*([-\d.]+)', transform)
-        if r_match:
-            rot = int(float(r_match.group(1)) * ANGLE_UNIT)
 
     if rx > 0 and abs(rx - ry) < 0.5:
         # Symmetric corners → native PowerPoint rounded rectangle. adj is
@@ -257,17 +364,25 @@ def convert_rect(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
         geom = '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
 
     shape_id = ctx.next_id()
-    off_x = px_to_emu(x)
-    off_y = px_to_emu(y)
-    ext_cx = px_to_emu(w)
-    ext_cy = px_to_emu(h)
+    xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu = _shape_xfrm_from_svg_rect(
+        ctx,
+        raw_x,
+        raw_y,
+        raw_w,
+        raw_h,
+        x,
+        y,
+        w,
+        h,
+        transform,
+    )
     return ShapeResult(
         xml=_wrap_shape(
             shape_id, f'Rectangle {shape_id}',
             off_x, off_y, ext_cx, ext_cy,
-            geom, fill, stroke, effect, rot=rot,
+            geom, fill, stroke, effect, xfrm_attr=xfrm_attr,
         ),
-        bounds_emu=(off_x, off_y, off_x + ext_cx, off_y + ext_cy),
+        bounds_emu=bounds_emu,
     )
 
 
@@ -439,6 +554,7 @@ def convert_circle(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
         )
 
     # --- Normal circle ---
+    transform = elem.get('transform')
     cx_s = ctx_x(cx_, ctx)
     cy_s = ctx_y(cy_, ctx)
     r_x = r * ctx.scale_x
@@ -462,17 +578,25 @@ def convert_circle(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
     geom = '<a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>'
 
     shape_id = ctx.next_id()
-    off_x = px_to_emu(x)
-    off_y = px_to_emu(y)
-    ext_cx = px_to_emu(w)
-    ext_cy = px_to_emu(h)
+    xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu = _shape_xfrm_from_svg_rect(
+        ctx,
+        cx_ - r,
+        cy_ - r,
+        r * 2,
+        r * 2,
+        x,
+        y,
+        w,
+        h,
+        transform,
+    )
     return ShapeResult(
         xml=_wrap_shape(
             shape_id, f'Ellipse {shape_id}',
             off_x, off_y, ext_cx, ext_cy,
-            geom, fill, stroke, effect,
+            geom, fill, stroke, effect, xfrm_attr=xfrm_attr,
         ),
-        bounds_emu=(off_x, off_y, off_x + ext_cx, off_y + ext_cy),
+        bounds_emu=bounds_emu,
     )
 
 
@@ -488,23 +612,15 @@ def convert_line(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
     heads (headEnd / tailEnd) correctly.  Plain lines (no markers) continue to
     use custom geometry which is sufficient and avoids flipH/flipV complexity.
     """
-    x1 = ctx_x(_f(elem.get('x1')), ctx)
-    y1 = ctx_y(_f(elem.get('y1')), ctx)
-    x2 = ctx_x(_f(elem.get('x2')), ctx)
-    y2 = ctx_y(_f(elem.get('y2')), ctx)
+    transform = elem.get('transform')
+    x1, y1 = _transformed_point(ctx, _f(elem.get('x1')), _f(elem.get('y1')), transform)
+    x2, y2 = _transformed_point(ctx, _f(elem.get('x2')), _f(elem.get('y2')), transform)
 
     min_x = min(x1, x2)
     min_y = min(y1, y2)
 
     stroke_op = get_stroke_opacity(elem, ctx)
     stroke = build_stroke_xml(elem, ctx, stroke_op)
-
-    rot = 0
-    transform = elem.get('transform')
-    if transform:
-        r_match = re.search(r'rotate\(\s*([-\d.]+)', transform)
-        if r_match:
-            rot = int(float(r_match.group(1)) * ANGLE_UNIT)
 
     shape_id = ctx.next_id()
     off_x = px_to_emu(min_x)
@@ -550,7 +666,6 @@ def convert_line(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
         elif flip_v:
             flip_attr = ' flipV="1"'
 
-        rot_attr = f' rot="{rot}"' if rot else ''
         xml = (
             f'<p:sp>'
             f'<p:nvSpPr>'
@@ -558,7 +673,7 @@ def convert_line(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
             f'<p:cNvSpPr/><p:nvPr/>'
             f'</p:nvSpPr>'
             f'<p:spPr>'
-            f'<a:xfrm{flip_attr}{rot_attr}>'
+            f'<a:xfrm{flip_attr}>'
             f'<a:off x="{off_x}" y="{off_y}"/>'
             f'<a:ext cx="{w_emu}" cy="{h_emu}"/>'
             f'</a:xfrm>'
@@ -595,7 +710,7 @@ def convert_line(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
         xml = _wrap_shape(
             shape_id, f'Line {shape_id}',
             off_x, off_y, w_emu, h_emu,
-            geom, '<a:noFill/>', stroke, rot=rot,
+            geom, '<a:noFill/>', stroke,
         )
 
     return ShapeResult(
@@ -618,22 +733,17 @@ def convert_path(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
     commands = svg_path_to_absolute(commands)
     commands = normalize_path_commands(commands)
 
-    tx, ty = 0.0, 0.0
-    rot = 0
     transform = elem.get('transform')
-    if transform:
-        t_match = re.search(r'translate\(\s*([-\d.]+)[\s,]+([-\d.]+)\s*\)', transform)
-        if t_match:
-            tx = float(t_match.group(1))
-            ty = float(t_match.group(2))
-        r_match = re.search(r'rotate\(\s*([-\d.]+)', transform)
-        if r_match:
-            rot = int(float(r_match.group(1)) * ANGLE_UNIT)
-
-    path_xml, min_x, min_y, width, height = path_commands_to_drawingml(
-        commands, ctx.translate_x + tx, ctx.translate_y + ty,
-        ctx.scale_x, ctx.scale_y,
-    )
+    if _uses_full_transform(ctx, transform):
+        commands = _transform_path_commands(commands, _combined_transform_matrix(ctx, transform))
+        path_xml, min_x, min_y, width, height = path_commands_to_drawingml(
+            commands, 0, 0, 1.0, 1.0,
+        )
+    else:
+        path_xml, min_x, min_y, width, height = path_commands_to_drawingml(
+            commands, ctx.translate_x, ctx.translate_y,
+            ctx.scale_x, ctx.scale_y,
+        )
 
     if not path_xml:
         return None
@@ -641,7 +751,7 @@ def convert_path(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
     w_emu = px_to_emu(width)
     h_emu = px_to_emu(height)
 
-    geom = _build_preset_geom_from_meta(elem)
+    geom = None if _uses_full_transform(ctx, transform) else _build_preset_geom_from_meta(elem)
     if geom is None:
         geom = f'''<a:custGeom>
 <a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/>
@@ -668,7 +778,7 @@ def convert_path(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
         xml=_wrap_shape(
             shape_id, f'Freeform {shape_id}',
             off_x, off_y, w_emu, h_emu,
-            geom, fill, stroke, effect, rot=rot,
+            geom, fill, stroke, effect,
         ),
         bounds_emu=(off_x, off_y, off_x + w_emu, off_y + h_emu),
     )
@@ -697,10 +807,17 @@ def convert_polygon(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None
         commands.append(PathCommand('L', [px_, py_]))
     commands.append(PathCommand('Z', []))
 
-    path_xml, min_x, min_y, width, height = path_commands_to_drawingml(
-        commands, ctx.translate_x, ctx.translate_y,
-        ctx.scale_x, ctx.scale_y,
-    )
+    transform = elem.get('transform')
+    if _uses_full_transform(ctx, transform):
+        commands = _transform_path_commands(commands, _combined_transform_matrix(ctx, transform))
+        path_xml, min_x, min_y, width, height = path_commands_to_drawingml(
+            commands, 0, 0, 1.0, 1.0,
+        )
+    else:
+        path_xml, min_x, min_y, width, height = path_commands_to_drawingml(
+            commands, ctx.translate_x, ctx.translate_y,
+            ctx.scale_x, ctx.scale_y,
+        )
 
     if not path_xml:
         return None
@@ -721,13 +838,6 @@ def convert_polygon(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None
     fill = build_fill_xml(elem, ctx, fill_op)
     stroke = build_stroke_xml(elem, ctx, stroke_op)
 
-    rot = 0
-    transform = elem.get('transform')
-    if transform:
-        r_match = re.search(r'rotate\(\s*([-\d.]+)', transform)
-        if r_match:
-            rot = int(float(r_match.group(1)) * ANGLE_UNIT)
-
     shape_id = ctx.next_id()
     off_x = px_to_emu(min_x)
     off_y = px_to_emu(min_y)
@@ -735,7 +845,7 @@ def convert_polygon(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None
         xml=_wrap_shape(
             shape_id, f'Polygon {shape_id}',
             off_x, off_y, w_emu, h_emu,
-            geom, fill, stroke, rot=rot,
+            geom, fill, stroke,
         ),
         bounds_emu=(off_x, off_y, off_x + w_emu, off_y + h_emu),
     )
@@ -751,10 +861,17 @@ def convert_polyline(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | Non
     for px_, py_ in points[1:]:
         commands.append(PathCommand('L', [px_, py_]))
 
-    path_xml, min_x, min_y, width, height = path_commands_to_drawingml(
-        commands, ctx.translate_x, ctx.translate_y,
-        ctx.scale_x, ctx.scale_y,
-    )
+    transform = elem.get('transform')
+    if _uses_full_transform(ctx, transform):
+        commands = _transform_path_commands(commands, _combined_transform_matrix(ctx, transform))
+        path_xml, min_x, min_y, width, height = path_commands_to_drawingml(
+            commands, 0, 0, 1.0, 1.0,
+        )
+    else:
+        path_xml, min_x, min_y, width, height = path_commands_to_drawingml(
+            commands, ctx.translate_x, ctx.translate_y,
+            ctx.scale_x, ctx.scale_y,
+        )
 
     if not path_xml:
         return None
@@ -775,13 +892,6 @@ def convert_polyline(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | Non
     fill = build_fill_xml(elem, ctx, fill_op)
     stroke = build_stroke_xml(elem, ctx, stroke_op)
 
-    rot = 0
-    transform = elem.get('transform')
-    if transform:
-        r_match = re.search(r'rotate\(\s*([-\d.]+)', transform)
-        if r_match:
-            rot = int(float(r_match.group(1)) * ANGLE_UNIT)
-
     shape_id = ctx.next_id()
     off_x = px_to_emu(min_x)
     off_y = px_to_emu(min_y)
@@ -789,7 +899,7 @@ def convert_polyline(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | Non
         xml=_wrap_shape(
             shape_id, f'Polyline {shape_id}',
             off_x, off_y, w_emu, h_emu,
-            geom, '<a:noFill/>', stroke, rot=rot,
+            geom, '<a:noFill/>', stroke,
         ),
         bounds_emu=(off_x, off_y, off_x + w_emu, off_y + h_emu),
     )
@@ -798,6 +908,41 @@ def convert_polyline(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | Non
 # ---------------------------------------------------------------------------
 # text
 # ---------------------------------------------------------------------------
+
+_SERIF_WIDTH_FAMILIES = {
+    'book antiqua',
+    'cambria',
+    'fangsong',
+    'garamond',
+    'georgia',
+    'kaiti',
+    'palatino',
+    'palatino linotype',
+    'serif',
+    'simsun',
+    'songti',
+    'times',
+    'times new roman',
+}
+
+_TEXTBOX_PADDING_MIN_PX = 0.5
+_TEXTBOX_PADDING_MAX_PX = 2.0
+_TEXTBOX_PADDING_RATIO = 0.04
+# Single-line auto-fit headroom interpolates between a low-caps base and an
+# all-caps ceiling by the fraction of cased letters that are uppercase. The
+# crude per-char width estimate undercounts capitals most, so all-caps lines
+# need the ceiling to keep wrap-ignoring renderers (LibreOffice) from folding;
+# mixed-case titles only need the base, so they no longer inherit the worst-
+# case width. Values are calibrated against LibreOffice renders of all-caps
+# bold lines (the case the per-char estimate undercounts most) with bases left
+# above the mixed-case and CJK render ratios; exact ratios shift with the
+# renderer's font substitution, so these carry deliberate margin rather than
+# tracking one environment's numbers.
+_TEXT_WIDTH_HEADROOM_BASE = 1.06
+_TEXT_WIDTH_HEADROOM_CAPS = 1.12
+_SERIF_TEXT_WIDTH_HEADROOM_BASE = 1.12
+_SERIF_TEXT_WIDTH_HEADROOM_CAPS = 1.36
+
 
 def _normalize_text(text: str, *, preserve_space: bool = False) -> str:
     """Collapse runs of whitespace into a single space; do NOT strip the ends.
@@ -821,6 +966,118 @@ def _normalize_text(text: str, *, preserve_space: bool = False) -> str:
 def _preserves_space(elem: ET.Element) -> bool:
     xml_space = elem.get('{http://www.w3.org/XML/1998/namespace}space') or elem.get('xml:space')
     return xml_space == 'preserve'
+
+
+def _parse_letter_spacing_px(
+    value: str | None,
+    *,
+    font_size: float,
+    scale_x: float = 1.0,
+) -> float:
+    """Parse an SVG letter-spacing value into scaled pixels."""
+    if not value:
+        return 0.0
+    raw = value.strip().lower()
+    if raw in {'normal', 'inherit', 'initial', 'unset'}:
+        return 0.0
+
+    match = re.fullmatch(r'([-+]?(?:\d*\.\d+|\d+\.?))(px|pt|em)?', raw)
+    if not match:
+        return 0.0
+
+    amount = float(match.group(1))
+    unit = match.group(2) or 'px'
+    if unit == 'em':
+        return amount * font_size
+    if unit == 'pt':
+        return amount * 4.0 / 3.0 * scale_x
+    return amount * scale_x
+
+
+def _letter_spacing_to_drawingml_spc(letter_spacing_px: float) -> str:
+    """Convert SVG px letter spacing into DrawingML rPr@spc."""
+    if abs(letter_spacing_px) < 1e-9:
+        return ''
+    spc_val = round(letter_spacing_px * FONT_PX_TO_HUNDREDTHS_PT)
+    return f' spc="{spc_val}"'
+
+
+def _is_serif_run(run: dict[str, Any]) -> bool:
+    """Return whether a text run uses a serif-like family."""
+    for family in str(run.get('font_family', '')).split(','):
+        name = family.strip().strip("'\"").lower()
+        if not name or name in {'sans-serif', 'sans serif'}:
+            continue
+        if name in _SERIF_WIDTH_FAMILIES:
+            return True
+        if 'serif' in name and 'sans' not in name:
+            return True
+    return False
+
+
+def _estimate_run_text_width(run: dict[str, Any]) -> float:
+    """Estimate one text run's rendered width, including tracking."""
+    text = str(run.get('text', ''))
+    base_width = estimate_text_width(
+        text,
+        float(run.get('font_size', 16)),
+        str(run.get('font_weight', '400')),
+    )
+    letter_spacing_px = float(run.get('letter_spacing', 0.0) or 0.0)
+    return base_width + letter_spacing_px * max(len(text) - 1, 0)
+
+
+def _uppercase_fraction(runs: list[dict[str, Any]]) -> float:
+    """Fraction of cased letters across ``runs`` that are uppercase.
+
+    Caseless scripts (CJK, digits, punctuation) are ignored, so a Chinese or
+    numeric line reports 0.0 and takes the low-caps headroom base.
+    """
+    upper = 0
+    cased = 0
+    for run in runs:
+        for ch in str(run.get('text', '')):
+            if ch.lower() != ch.upper():
+                cased += 1
+                if ch.isupper():
+                    upper += 1
+    if not cased:
+        return 0.0
+    return upper / cased
+
+
+def _estimate_text_runs_width(
+    runs: list[dict[str, Any]],
+    *,
+    include_headroom: bool = True,
+) -> float:
+    """Estimate a line of text runs.
+
+    ``include_headroom`` is useful for single-line auto-fit boxes where a
+    renderer that measures text slightly wider would otherwise wrap. The
+    headroom scales with the line's uppercase fraction: all-caps lines (whose
+    width the per-char estimate undercounts most) get the full ceiling, while
+    mixed-case titles take a small base instead of inheriting the worst case.
+    Paragraph boxes use this value as a wrapping constraint, so adding headroom
+    there stretches the merged text frame beyond the author's source line width.
+    """
+    width = sum(_estimate_run_text_width(run) for run in runs)
+    if not include_headroom:
+        return width
+    caps = _uppercase_fraction(runs)
+    if any(_is_serif_run(run) for run in runs):
+        base, ceiling = _SERIF_TEXT_WIDTH_HEADROOM_BASE, _SERIF_TEXT_WIDTH_HEADROOM_CAPS
+    else:
+        base, ceiling = _TEXT_WIDTH_HEADROOM_BASE, _TEXT_WIDTH_HEADROOM_CAPS
+    return width * (base + (ceiling - base) * caps)
+
+
+def _textbox_padding(font_size: float) -> float:
+    """Return small text-frame slack without visibly lengthening the box."""
+    return max(
+        _TEXTBOX_PADDING_MIN_PX,
+        min(_TEXTBOX_PADDING_MAX_PX, font_size * _TEXTBOX_PADDING_RATIO),
+    )
 
 
 def _override_run_attrs(
@@ -854,6 +1111,12 @@ def _override_run_attrs(
         run_attrs['font_style'] = tspan.get('font-style')
     if tspan.get('text-decoration'):
         run_attrs['text_decoration'] = tspan.get('text-decoration')
+    if tspan.get('letter-spacing'):
+        run_attrs['letter_spacing'] = _parse_letter_spacing_px(
+            tspan.get('letter-spacing'),
+            font_size=float(run_attrs.get('font_size', 16)),
+            scale_x=float(run_attrs.get('_scale_x', 1.0)),
+        )
     return run_attrs
 
 
@@ -894,8 +1157,8 @@ def _build_text_runs(
     """Build a list of text runs from a <text> element, handling <tspan> children.
 
     Each run is a dict with keys: text, fill, fill_raw, font_weight,
-    font_style, font_family, font_size. Nested tspans are walked recursively so
-    inline format changes inside a tspan still produce distinct runs.
+    font_style, font_family, font_size, letter_spacing. Nested tspans are walked
+    recursively so inline format changes inside a tspan still produce distinct runs.
     """
     runs: list[dict[str, Any]] = []
     preserve_space = _preserves_space(elem)
@@ -981,17 +1244,25 @@ def _build_run_xml(
     fs_px = run.get('font_size', 16)
     fstyle = run.get('font_style', '')
     ff = run.get('font_family', '')
+    letter_spacing_px = float(run.get('letter_spacing', 0.0) or 0.0)
     opacity = run.get('opacity')
 
     text_dec = run.get('text_decoration', '')
 
-    sz = round(fs_px * FONT_PX_TO_HUNDREDTHS_PT)
+    # Exported font size = fs_px * FONT_PX_TO_HUNDREDTHS_PT hundredths-of-pt,
+    # rounded to **one decimal place of pt** (the nearest 10 hundredths). No 0.5pt
+    # / integer snapping — whatever the px works out to is the size, e.g.
+    # 18px -> 13.5pt, 24px -> 18.0pt, 42px -> 31.5pt.
+    sz = int(round(fs_px * FONT_PX_TO_HUNDREDTHS_PT / 10.0)) * 10
     b_attr = ' b="1"' if fw in ('bold', '600', '700', '800', '900') else ''
     i_attr = ' i="1"' if fstyle == 'italic' else ''
     u_attr = ' u="sng"' if 'underline' in text_dec else ''
     strike_attr = ' strike="sngStrike"' if 'line-through' in text_dec else ''
+    spc_attr = _letter_spacing_to_drawingml_spc(letter_spacing_px)
 
     fonts = parse_font_family(ff) if ff else default_fonts
+    run_fonts = resolve_text_run_fonts(text, fonts)
+    lang = detect_text_lang(text)
 
     fill_xml = _build_text_fill_xml(fill, fill_raw, opacity, ctx)
     outline_xml = _build_text_outline_xml(run)
@@ -999,13 +1270,13 @@ def _build_run_xml(
     space_attr = ' xml:space="preserve"' if text != text.strip() or '  ' in text else ''
 
     return f'''<a:r>
-<a:rPr lang="zh-CN" sz="{sz}"{b_attr}{i_attr}{u_attr}{strike_attr} dirty="0">
+<a:rPr lang="{lang}" sz="{sz}"{b_attr}{i_attr}{u_attr}{strike_attr}{spc_attr} dirty="0">
 {outline_xml}
 {fill_xml}
 {effect_xml}
-<a:latin typeface="{_xml_escape(fonts['latin'])}"/>
-<a:ea typeface="{_xml_escape(fonts['ea'])}"/>
-<a:cs typeface="{_xml_escape(fonts['latin'])}"/>
+<a:latin typeface="{_xml_escape(run_fonts['latin'])}"/>
+<a:ea typeface="{_xml_escape(run_fonts['ea'])}"/>
+<a:cs typeface="{_xml_escape(run_fonts['cs'])}"/>
 </a:rPr>
 <a:t{space_attr}>{_xml_escape(text)}</a:t>
 </a:r>'''
@@ -1027,6 +1298,11 @@ def convert_text(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
     stroke_opacity = get_stroke_opacity(elem, ctx)
     font_style = _get_attr(elem, 'font-style', ctx) or ''
     text_decoration = _get_attr(elem, 'text-decoration', ctx) or ''
+    letter_spacing_px = _parse_letter_spacing_px(
+        _get_attr(elem, 'letter-spacing', ctx),
+        font_size=font_size,
+        scale_x=ctx.scale_x or 1.0,
+    )
 
     fonts = parse_font_family(font_family_str)
 
@@ -1038,6 +1314,8 @@ def convert_text(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
         'font_family': font_family_str,
         'font_style': font_style,
         'text_decoration': text_decoration,
+        'letter_spacing': letter_spacing_px,
+        '_scale_x': ctx.scale_x or 1.0,
         'opacity': opacity,
         'stroke_raw': stroke_raw,
         'stroke_width': stroke_width,
@@ -1075,11 +1353,7 @@ def convert_text(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
             if not line_runs:
                 continue
             visual_line_widths.append(
-                estimate_text_width(
-                    ''.join(r['text'] for r in line_runs),
-                    font_size,
-                    font_weight,
-                )
+                _estimate_text_runs_width(line_runs, include_headroom=False)
             )
             soft_break = child.get('data-paragraph-soft-break') == '1'
             if soft_break and paragraph_runs:
@@ -1136,9 +1410,9 @@ def convert_text(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
             + font_size * 1.5
         )
     else:
-        text_width = estimate_text_width(full_text, font_size, font_weight) * 1.05
+        text_width = _estimate_text_runs_width(runs)
         text_height = font_size * 1.5
-    padding = font_size * 0.1
+    padding = _textbox_padding(font_size)
 
     # Adjust position based on text-anchor
     if text_anchor == 'middle':
@@ -1173,16 +1447,6 @@ def convert_text(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
             raw_box_y = (box_y - ctx.translate_y) / sy
             box_x = ctx.translate_x + sx * (a * raw_box_x + e)
             box_y = ctx.translate_y + sy * (d * raw_box_y + f)
-
-    # Letter spacing
-    spc_attr = ''
-    letter_spacing = _get_attr(elem, 'letter-spacing', ctx)
-    if letter_spacing:
-        try:
-            spc_val = float(letter_spacing) * 100
-            spc_attr = f' spc="{int(spc_val)}"'
-        except ValueError:
-            pass
 
     # Text rotation. SVG's rotate(angle [cx cy]) rotates around (cx, cy), but
     # DrawingML's <a:xfrm rot="..."> rotates the shape around its own center.
@@ -1258,8 +1522,8 @@ def convert_text(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
     # Paragraph mode: wrap="square" so text reflows when the user resizes,
     # but NO spAutoFit — otherwise PowerPoint expands the frame to fit a
     # long joined-up <a:p> on one line, blowing past the canvas. The cx we
-    # write below (longest SVG line) is the design target width;
-    # PowerPoint wraps long paragraphs inside this width.
+    # write below is the longest source SVG line without single-line renderer
+    # headroom; PowerPoint wraps long paragraphs inside this design width.
     # Single-line text keeps wrap="none" + spAutoFit for tight fidelity.
     if paragraph_runs is not None:
         body_pr_xml = (
@@ -1488,6 +1752,41 @@ def _picture_xfrm_from_rect(
     return '', off_x, off_y, ext_cx, ext_cy, (off_x, off_y, off_x + ext_cx, off_y + ext_cy)
 
 
+def _picture_xfrm_from_svg_rect(
+    ctx: ConvertContext,
+    raw_x: float,
+    raw_y: float,
+    raw_w: float,
+    raw_h: float,
+    resolved_x: float,
+    resolved_y: float,
+    resolved_w: float,
+    resolved_h: float,
+    transform: str | None,
+) -> tuple[str, int, int, int, int, tuple[int, int, int, int]]:
+    """Build picture xfrm data, honoring element-level SVG transforms.
+
+    ``raw_*`` values stay in the element's source SVG coordinate space for
+    matrix decomposition; ``resolved_*`` values are the existing scalar path.
+    """
+    if ctx.use_transform_matrix:
+        matrix = ctx.transform_matrix
+        if transform:
+            matrix = matrix_multiply(matrix, parse_transform_matrix(transform))
+        return rect_to_dml_xfrm(raw_x, raw_y, raw_w, raw_h, matrix)
+
+    if transform:
+        context_matrix = (
+            ctx.scale_x, 0.0,
+            0.0, ctx.scale_y,
+            ctx.translate_x, ctx.translate_y,
+        )
+        matrix = matrix_multiply(context_matrix, parse_transform_matrix(transform))
+        return rect_to_dml_xfrm(raw_x, raw_y, raw_w, raw_h, matrix)
+
+    return _picture_xfrm_from_rect(ctx, resolved_x, resolved_y, resolved_w, resolved_h)
+
+
 def _read_image_size(data: bytes) -> tuple[int | None, int | None]:
     """Read intrinsic image dimensions (width, height) from raw bytes.
 
@@ -1507,6 +1806,184 @@ def _read_image_size(data: bytes) -> tuple[int | None, int | None]:
             return img.size
     except (UnidentifiedImageError, OSError, ValueError):
         return (None, None)
+
+
+def _parse_preserve_aspect_ratio(par: str | None) -> tuple[str, str]:
+    """Parse SVG preserveAspectRatio into ``(align, mode)``."""
+    parts = (par or 'xMidYMid meet').strip().split()
+    align = parts[0] if parts else 'xMidYMid'
+    mode = parts[1] if len(parts) > 1 else 'meet'
+    return align, mode
+
+
+def _image_has_alpha(img: Any) -> bool:
+    """Return whether a PIL image carries useful transparency."""
+    if img.mode in ('RGBA', 'LA'):
+        return True
+    if img.mode == 'P':
+        return 'transparency' in getattr(img, 'info', {})
+    return False
+
+
+def _image_target_size(
+    display_w: float,
+    display_h: float,
+    *,
+    max_dimension: int | None,
+    scale: float,
+) -> tuple[int, int]:
+    """Resolve optimized pixel dimensions from rendered SVG dimensions."""
+    target_w = max(1, int(round(display_w * max(scale, 1.0))))
+    target_h = max(1, int(round(display_h * max(scale, 1.0))))
+    if max_dimension and max(target_w, target_h) > max_dimension:
+        ratio = max_dimension / max(target_w, target_h)
+        target_w = max(1, int(round(target_w * ratio)))
+        target_h = max(1, int(round(target_h * ratio)))
+    return target_w, target_h
+
+
+def _fit_full_image_target(
+    img_w: int,
+    img_h: int,
+    box_w: float,
+    box_h: float,
+    align: str,
+    mode: str,
+    *,
+    sizing: str,
+    max_dimension: int | None,
+    scale: float,
+) -> tuple[int, int]:
+    """Size the full source image; never crop pixels.
+
+    ``cap`` mode only limits oversized source images by maximum dimension.
+    ``display`` mode sizes to the rendered SVG box budget.
+    """
+    if img_w <= 0 or img_h <= 0:
+        return (1, 1)
+
+    if sizing == 'cap':
+        target_w, target_h = img_w, img_h
+        if max_dimension and max(target_w, target_h) > max_dimension:
+            ratio = max_dimension / max(target_w, target_h)
+            target_w = max(1, int(round(target_w * ratio)))
+            target_h = max(1, int(round(target_h * ratio)))
+        return target_w, target_h
+
+    target_box_w, target_box_h = _image_target_size(
+        box_w,
+        box_h,
+        max_dimension=None,
+        scale=scale,
+    )
+    img_ratio = img_w / img_h
+    box_ratio = box_w / box_h if box_h else img_ratio
+
+    if align != 'none' and mode == 'slice':
+        if box_ratio >= img_ratio:
+            target_w = target_box_w
+            target_h = int(round(target_w / img_ratio))
+        else:
+            target_h = target_box_h
+            target_w = int(round(target_h * img_ratio))
+    else:
+        ratio = min(target_box_w / img_w, target_box_h / img_h, 1.0)
+        target_w = int(round(img_w * ratio))
+        target_h = int(round(img_h * ratio))
+
+    target_w = max(1, target_w)
+    target_h = max(1, target_h)
+    if max_dimension and max(target_w, target_h) > max_dimension:
+        ratio = max_dimension / max(target_w, target_h)
+        target_w = max(1, int(round(target_w * ratio)))
+        target_h = max(1, int(round(target_h * ratio)))
+    return target_w, target_h
+
+
+def _resize_for_target(img: Any, target_w: int, target_h: int) -> Any:
+    """Downscale a PIL image to the target dimensions without upsampling."""
+    width, height = img.size
+    if target_w >= width and target_h >= height:
+        return img
+    ratio = min(target_w / width, target_h / height)
+    if ratio >= 1.0:
+        return img
+    try:
+        from PIL import Image  # type: ignore
+    except ImportError:
+        return img
+    new_size = (max(1, int(round(width * ratio))), max(1, int(round(height * ratio))))
+    return img.resize(new_size, Image.Resampling.LANCZOS)
+
+
+def _encode_optimized_image(img: Any, *, prefer_jpeg: bool, quality: int) -> tuple[bytes, str] | None:
+    """Encode a PIL image for PPTX media."""
+    buf = io.BytesIO()
+    try:
+        if prefer_jpeg and not _image_has_alpha(img):
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            img.save(buf, format='JPEG', quality=max(1, min(quality, 100)), optimize=True)
+            return buf.getvalue(), 'jpg'
+        if img.mode == 'P':
+            img = img.convert('RGBA' if _image_has_alpha(img) else 'RGB')
+        img.save(buf, format='PNG', optimize=True)
+        return buf.getvalue(), 'png'
+    except (OSError, ValueError):
+        return None
+
+
+def _optimize_image_for_pptx(
+    elem: ET.Element,
+    ctx: ConvertContext,
+    img_data: bytes,
+    img_format: str,
+    box_w: float,
+    box_h: float,
+) -> tuple[bytes, str]:
+    """Optimize full raster image bytes for native PPTX embedding."""
+    if not ctx.image_optimize:
+        return img_data, img_format
+    if img_format.lower() in {'svg', 'emf', 'wmf'}:
+        return img_data, img_format
+
+    try:
+        from PIL import Image, UnidentifiedImageError  # type: ignore
+    except ImportError:
+        return img_data, img_format
+
+    try:
+        img = Image.open(io.BytesIO(img_data))
+        img.load()
+    except (UnidentifiedImageError, OSError, ValueError):
+        return img_data, img_format
+
+    align, mode = _parse_preserve_aspect_ratio(elem.get('preserveAspectRatio'))
+    target_w, target_h = _fit_full_image_target(
+        img.size[0],
+        img.size[1],
+        box_w,
+        box_h,
+        align,
+        mode,
+        sizing=ctx.image_sizing,
+        max_dimension=ctx.image_max_dimension,
+        scale=ctx.image_scale,
+    )
+
+    original_size = img.size
+    img = _resize_for_target(img, target_w, target_h)
+    resized = img.size != original_size
+    prefer_jpeg = img_format.lower() in {'png', 'jpg', 'jpeg', 'bmp', 'tif', 'tiff'}
+    encoded = _encode_optimized_image(img, prefer_jpeg=prefer_jpeg, quality=ctx.image_quality)
+    if encoded is None:
+        return img_data, img_format
+
+    optimized_data, optimized_format = encoded
+    if not resized and len(optimized_data) >= len(img_data):
+        return img_data, img_format
+
+    return optimized_data, optimized_format
 
 
 def _compute_slice_src_rect(
@@ -1570,10 +2047,7 @@ def _resolve_image_src_rect(
     shrinks the picture frame to match image aspect ratio); none mode keeps
     the legacy stretch behaviour intentionally.
     """
-    par = (elem.get('preserveAspectRatio') or 'xMidYMid meet').strip()
-    parts = par.split()
-    align = parts[0] if parts else 'xMidYMid'
-    mode = parts[1] if len(parts) > 1 else 'meet'
+    align, mode = _parse_preserve_aspect_ratio(elem.get('preserveAspectRatio'))
 
     if align == 'none' or mode != 'slice':
         return ''  # meet handled by frame fit; none → stretch is correct per SVG spec
@@ -1611,10 +2085,7 @@ def _resolve_image_meet_fit(
       - intrinsic image dimensions cannot be read
       - frame already matches image ratio (no-op)
     """
-    par = (elem.get('preserveAspectRatio') or 'xMidYMid meet').strip()
-    parts = par.split()
-    align = parts[0] if parts else 'xMidYMid'
-    mode = parts[1] if len(parts) > 1 else 'meet'
+    align, mode = _parse_preserve_aspect_ratio(elem.get('preserveAspectRatio'))
 
     if align == 'none' or mode == 'slice':
         return None
@@ -1686,15 +2157,15 @@ def convert_image(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
     else:
         if ctx.svg_dir is None:
             return None
-        img_path = ctx.svg_dir / href
-        if not img_path.exists():
-            img_path = ctx.svg_dir.parent / href
-        if not img_path.exists():
-            raise FileNotFoundError(f'External image not found: {href}')
+        img_path = _resolve_external_image(ctx.svg_dir, href)
         img_format = img_path.suffix.lstrip('.').lower()
         if img_format == 'jpeg':
             img_format = 'jpg'
         img_data = img_path.read_bytes()
+
+    img_data, img_format = _optimize_image_for_pptx(
+        elem, ctx, img_data, img_format, w, h,
+    )
 
     img_idx = len(ctx.media_files) + 1
     img_filename = f's{ctx.slide_num}_img{img_idx}.{img_format}'
@@ -1707,21 +2178,14 @@ def convert_image(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
         'target': f'../media/{img_filename}',
     })
 
-    rot = 0
     transform = elem.get('transform')
-    if transform and not ctx.use_transform_matrix:
-        r_match = re.search(r'rotate\(\s*([-\d.]+)', transform)
-        if r_match:
-            rot = int(float(r_match.group(1)) * ANGLE_UNIT)
-    rot_attr = f' rot="{rot}"' if rot else ''
 
     # Resolve clip-path → DrawingML geometry
     clip_geom = _resolve_clip_geometry(elem, ctx, raw_x, raw_y, raw_w, raw_h)
 
-    # Resolve preserveAspectRatio="<align> slice" → DrawingML <a:srcRect>.
-    # This keeps the original image intact in the .pptx and lets users
-    # re-crop or reset the picture in PowerPoint, instead of permanently
-    # baking the crop into the embedded asset.
+    # Resolve preserveAspectRatio="<align> slice" as DrawingML crop metadata.
+    # Image optimization only downscales the full source image; it never crops
+    # pixels out of the embedded media.
     src_rect_xml = _resolve_image_src_rect(elem, img_data, w, h)
 
     # Resolve preserveAspectRatio="<align> meet" by shrinking the picture
@@ -1736,15 +2200,41 @@ def convert_image(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
     shape_id = ctx.next_id()
     if meet_fit is not None:
         dx, dy, fit_w, fit_h = meet_fit
-        xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu = _picture_xfrm_from_rect(
-            ctx, x + dx, y + dy, fit_w, fit_h,
+        if ctx.use_transform_matrix:
+            raw_fit_x = raw_x + dx
+            raw_fit_y = raw_y + dy
+            raw_fit_w = fit_w
+            raw_fit_h = fit_h
+        else:
+            raw_fit_x = raw_x + (dx / ctx.scale_x if ctx.scale_x else dx)
+            raw_fit_y = raw_y + (dy / ctx.scale_y if ctx.scale_y else dy)
+            raw_fit_w = fit_w / ctx.scale_x if ctx.scale_x else fit_w
+            raw_fit_h = fit_h / ctx.scale_y if ctx.scale_y else fit_h
+        xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu = _picture_xfrm_from_svg_rect(
+            ctx,
+            raw_fit_x,
+            raw_fit_y,
+            raw_fit_w,
+            raw_fit_h,
+            x + dx,
+            y + dy,
+            fit_w,
+            fit_h,
+            transform,
         )
     else:
-        xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu = _picture_xfrm_from_rect(
-            ctx, x, y, w, h,
+        xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu = _picture_xfrm_from_svg_rect(
+            ctx,
+            raw_x,
+            raw_y,
+            raw_w,
+            raw_h,
+            x,
+            y,
+            w,
+            h,
+            transform,
         )
-    if rot_attr:
-        xfrm_attr += rot_attr
 
     return ShapeResult(xml=f'''<p:pic>
 <p:nvPicPr>
@@ -1770,10 +2260,14 @@ def convert_image(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
 
 def convert_ellipse(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
     """Convert SVG <ellipse> to DrawingML ellipse shape."""
-    cx_ = ctx_x(_f(elem.get('cx')), ctx)
-    cy_ = ctx_y(_f(elem.get('cy')), ctx)
-    rx = _f(elem.get('rx')) * ctx.scale_x
-    ry = _f(elem.get('ry')) * ctx.scale_y
+    raw_cx = _f(elem.get('cx'))
+    raw_cy = _f(elem.get('cy'))
+    raw_rx = _f(elem.get('rx'))
+    raw_ry = _f(elem.get('ry'))
+    cx_ = ctx_x(raw_cx, ctx)
+    cy_ = ctx_y(raw_cy, ctx)
+    rx = raw_rx * ctx.scale_x
+    ry = raw_ry * ctx.scale_y
 
     if rx <= 0 or ry <= 0:
         return None
@@ -1790,25 +2284,28 @@ def convert_ellipse(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None
 
     geom = '<a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>'
 
-    rot = 0
     transform = elem.get('transform')
-    if transform:
-        r_match = re.search(r'rotate\(\s*([-\d.]+)', transform)
-        if r_match:
-            rot = int(float(r_match.group(1)) * ANGLE_UNIT)
 
     shape_id = ctx.next_id()
-    off_x = px_to_emu(x)
-    off_y = px_to_emu(y)
-    ext_cx = px_to_emu(w)
-    ext_cy = px_to_emu(h)
+    xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu = _shape_xfrm_from_svg_rect(
+        ctx,
+        raw_cx - raw_rx,
+        raw_cy - raw_ry,
+        raw_rx * 2,
+        raw_ry * 2,
+        x,
+        y,
+        w,
+        h,
+        transform,
+    )
     return ShapeResult(
         xml=_wrap_shape(
             shape_id, f'Ellipse {shape_id}',
             off_x, off_y, ext_cx, ext_cy,
-            geom, fill, stroke, rot=rot,
+            geom, fill, stroke, xfrm_attr=xfrm_attr,
         ),
-        bounds_emu=(off_x, off_y, off_x + ext_cx, off_y + ext_cy),
+        bounds_emu=bounds_emu,
     )
 
 
@@ -1887,15 +2384,15 @@ def convert_nested_svg(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | N
     else:
         if ctx.svg_dir is None:
             return None
-        img_path = ctx.svg_dir / href
-        if not img_path.exists():
-            img_path = ctx.svg_dir.parent / href
-        if not img_path.exists():
-            raise FileNotFoundError(f'External image not found: {href}')
+        img_path = _resolve_external_image(ctx.svg_dir, href)
         img_format = img_path.suffix.lstrip('.').lower()
         if img_format == 'jpeg':
             img_format = 'jpg'
         img_data = img_path.read_bytes()
+
+    img_data, img_format = _optimize_image_for_pptx(
+        image_elem, ctx, img_data, img_format, w, h,
+    )
 
     img_idx = len(ctx.media_files) + 1
     img_filename = f's{ctx.slide_num}_img{img_idx}.{img_format}'
@@ -1908,20 +2405,21 @@ def convert_nested_svg(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | N
         'target': f'../media/{img_filename}',
     })
 
-    rot = 0
     transform = elem.get('transform')
-    if transform and not ctx.use_transform_matrix:
-        r_match = re.search(r'rotate\(\s*([-\d.]+)', transform)
-        if r_match:
-            rot = int(float(r_match.group(1)) * ANGLE_UNIT)
-    rot_attr = f' rot="{rot}"' if rot else ''
 
     shape_id = ctx.next_id()
-    xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu = _picture_xfrm_from_rect(
-        ctx, x, y, w, h,
+    xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu = _picture_xfrm_from_svg_rect(
+        ctx,
+        svg_x,
+        svg_y,
+        svg_w,
+        svg_h,
+        x,
+        y,
+        w,
+        h,
+        transform,
     )
-    if rot_attr:
-        xfrm_attr += rot_attr
     clip_geom = _resolve_clip_geometry(elem, ctx, svg_x, svg_y, svg_w, svg_h)
 
     return ShapeResult(xml=f'''<p:pic>

@@ -12,7 +12,11 @@ PPT Master is an AI-driven presentation generation system. Multi-role collaborat
 
 > Topic-only requests with no source material: run the standalone [`topic-research`](skills/ppt-master/workflows/topic-research.md) workflow before SKILL.md Step 1 to gather web materials.
 >
-> Template fill: when the user provides an existing `.pptx` template plus text materials or a topic and asks to reuse the original PPT design or fill content back into it (for example, "fill this deck with the new content", "fill this back into the template", or "reuse this deck's design"), run the standalone [`template-fill-pptx`](skills/ppt-master/workflows/template-fill-pptx.md) workflow. This route edits PPTX directly and must not enter the SVG generation pipeline.
+> Template fill: when the user provides an existing `.pptx` template plus text materials or a topic and asks to generate a `.pptx` from that raw template, run the standalone [`template-fill-pptx`](skills/ppt-master/workflows/template-fill-pptx.md) workflow. This route treats the PPTX as a native slide library, edits PPTX directly, and must not enter the SVG generation pipeline.
+>
+> Template creation boundary: a `.pptx` may enter the main pipeline as source material. But SVG/template-based generation cannot consume a raw PPTX as a template. If the user wants the SVG generation route, they must first run the standalone [`create-template`](skills/ppt-master/workflows/create-template.md) workflow and return with the resulting template directory path. SKILL.md Step 3 consumes explicit template directories only.
+>
+> Beautify / re-layout: when the user provides an existing `.pptx` and asks to beautify or re-layout it while keeping the content (for example, "把这份 PPT 美化一下", "重新排版，内容别动", or wants to paste the regenerated elements back into the original deck), run the standalone [`beautify-pptx`](skills/ppt-master/workflows/beautify-pptx.md) workflow. Mirror of template-fill: content is preserved verbatim, the source's palette/fonts are inherited as truth, only layout is redesigned. Unlike template-fill, it regenerates a native deck through the SVG pipeline (Strategist → Executor → export), one source slide to one page; it does not edit the source in place. Routing boundary — beautify is for "keep this deck, just lay it out better": page count and page order are preserved 1:1. If the original page breakdown itself should be reconsidered (merge / split / reorder pages, re-outline the structure), that is NOT beautify: convert the deck with [`ppt_to_md`](skills/ppt-master/scripts/source_to_md/ppt_to_md.py) and run the main SKILL.md pipeline, where the Strategist re-architects the outline freely from the extracted content. The discriminator is page count / order: any change to it — split, merge, drop, reorder, even just splitting a crowded page so it reads better — is the main pipeline; beautify is strictly 1:1. Decide by one question: is the source's page split information to preserve, or just the previous author's structure to improve?
 >
 > Phase B resumption (split-mode execution): when the user opens a fresh chat and says "继续生成 projects/<x>" or similar, run the standalone [`resume-execute`](skills/ppt-master/workflows/resume-execute.md) workflow to enter Phase B (SVG generation + export) without re-running Phase A.
 >
@@ -22,7 +26,9 @@ PPT Master is an AI-driven presentation generation system. Multi-role collaborat
 >
 > Recorded narration / video export: run the standalone [`generate-audio`](skills/ppt-master/workflows/generate-audio.md) workflow after post-processing.
 >
-> Object-level animation tuning: when the user asks to change animation order, effect, timing, or a specific object's reveal behavior, run the standalone [`customize-animations`](skills/ppt-master/workflows/customize-animations.md) workflow. Default export already has global animations; do not create `animations.json` unless customization was requested.
+> Existing PPTX native enhancement without regeneration: when the user provides a finished `.pptx` and asks to optimize it while keeping existing content / layout / format stable — for example adding speaker notes, narration audio, automatic slide advance, or page transitions — run the standalone [`native-enhance-pptx`](skills/ppt-master/workflows/native-enhance-pptx.md) workflow. This route archives the source PPTX into the project (`projects/` sources are moved; external sources are copied), then patches it directly at the OOXML zip layer and must not enter the SVG generation pipeline.
+>
+> Object-level animation tuning: when the user asks to change animation order, effect, timing, or a specific object's reveal behavior, run the standalone [`customize-animations`](skills/ppt-master/workflows/customize-animations.md) workflow. Default export applies page transitions but no per-element entrance animation (element builds are opt-in); create `animations.json` or pass `-a auto` only when the user asks for element animation or object-level customization.
 >
 > Live preview: any time the user mentions "live preview", "preview", "看效果", or wants to click/select a slide element, run [`live-preview`](skills/ppt-master/workflows/live-preview.md). Step 6 auto-starts it during generation; the workflow covers post-export re-entry and applying submitted annotations.
 >
@@ -65,6 +71,12 @@ python3 skills/ppt-master/scripts/project_manager.py init <project_name> --forma
 python3 skills/ppt-master/scripts/project_manager.py import-sources <project_path> <source_files_or_URLs...> --move
 python3 skills/ppt-master/scripts/project_manager.py validate <project_path>
 
+# Icon selection — copy chosen library icons into <project>/icons/ (missing names reported + non-zero = re-pick)
+python3 skills/ppt-master/scripts/icon_sync.py <project_path> <lib/name> [<lib/name>...]
+
+# Step 4 Eight Confirmations — interactive visual page (default auto-launch; chat fallback)
+python3 skills/ppt-master/scripts/confirm_ui/server.py <project_path> --daemon --wait
+
 # Image tools and SVG quality check
 python3 skills/ppt-master/scripts/analyze_images.py <project_path>/images
 # In-pipeline AI image generation — manifest mode (required, even for 1 image):
@@ -72,10 +84,17 @@ python3 skills/ppt-master/scripts/image_gen.py --manifest <project_path>/images/
 python3 skills/ppt-master/scripts/image_gen.py --render-md <project_path>/images/image_prompts.json
 # Out-of-pipeline one-off / debug / single-image fixup only (no manifest, no sidecar):
 python3 skills/ppt-master/scripts/image_gen.py "prompt" --aspect_ratio 16:9 --image_size 1K -o <project_path>/images
-python3 skills/ppt-master/scripts/svg_editor/server.py <project_path> --live
+# Spot illustrations — slice one AI grid sheet into individual elements (see image-generator.md §4.3):
+python3 skills/ppt-master/scripts/slice_images.py <project_path>/images/<sheet>.png --grid RxC --names a,b,c --trim --alpha
+python3 skills/ppt-master/scripts/svg_editor/server.py <project_path> --live --daemon
 python3 skills/ppt-master/scripts/svg_quality_checker.py <project_path>
 python3 skills/ppt-master/scripts/animation_config.py scaffold <project_path>  # optional, only for custom object-level animation
 python3 skills/ppt-master/scripts/animation_config.py validate <project_path>  # optional, before re-export
+
+# Existing PPTX native enhancement workflow — direct OOXML patch, no SVG conversion
+python3 skills/ppt-master/scripts/native_enhance_pptx.py init <PPTX_file> --name <project_slug>
+python3 skills/ppt-master/scripts/native_enhance_pptx.py validate <project_path>
+python3 skills/ppt-master/scripts/native_enhance_pptx.py apply <project_path>
 
 # Post-processing pipeline: run sequentially, one command at a time
 python3 skills/ppt-master/scripts/total_md_split.py <project_path>

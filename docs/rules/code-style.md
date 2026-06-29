@@ -121,6 +121,19 @@ if __name__ == "__main__":
 | Internal helpers `--help` | Module-level: `if __name__ == "__main__" and any(arg in {"-h", "--help", "help"} for arg in sys.argv[1:]): print(__doc__); raise SystemExit(0)` |
 | Output | Progress / status to **stderr**; the script's primary output (if any) to stdout |
 
+**Help and argument validation requirements**:
+
+- `-h` / `--help` must be handled by `argparse` (preferred) or an explicit early helper guard before any side effect: no directory creation, file writes, network calls, package installs, or long-running servers.
+- Help flags must never be accepted as positional values. Examples: `init --help` must not create a project named `--help`; `export --help` must not write a file named `--help`.
+- Scripts with subcommands use `argparse` subparsers. Each subcommand must provide its own help (`<script> <subcmd> --help`) and validate its own required arguments before doing work.
+- Missing required arguments and unknown flags must print a usage/error message and exit non-zero. Do not silently ignore unknown flags or continue with partial defaults.
+- For internal helper modules that are directly executable only for diagnostics, non-help invocation should either run a documented diagnostic command or print a short "use via ..." message and exit non-zero; it must not fail with an import traceback.
+
+**Console encoding**:
+
+- Every directly-runnable entry script must call `configure_utf8_stdio()` (from `console_encoding.py`, §9) once at startup, before any user-facing print or before importing optional dependencies that may print. It forces `stdout`/`stderr` to UTF-8 with `errors="replace"` so non-UTF-8 Windows locales (e.g. GBK) do not crash on Unicode status output. On systems already using UTF-8 it leaves the effective encoding unchanged.
+- Subdirectory scripts inject the scripts root onto `sys.path` first (§3), then import the helper. Pure library modules with no `__main__` entry do not need it. File I/O still passes `encoding="utf-8"` explicitly (§13); this rule only covers the console.
+
 ---
 
 ## 5. Type Hints
@@ -202,14 +215,15 @@ Error messages **must include the fix** — "what env var to set", "where to get
 
 ## 9. Shared Helpers Layer
 
-Common functionality lives in two designated submodules. New scripts use these, not their own copies:
+Common functionality lives in these designated submodules. New scripts use these, not their own copies:
 
 | Module | Owns |
 |---|---|
-| [`image_backends/backend_common.py`](../skills/ppt-master/scripts/image_backends/backend_common.py) | HTTP download, retry, image format detection, save-with-Pillow-transcode |
-| [`image_sources/provider_common.py`](../skills/ppt-master/scripts/image_sources/provider_common.py) | License classification, query simplification, scoring, attribution text, dataclasses |
-| [`project_utils.py`](../skills/ppt-master/scripts/project_utils.py) | Canvas formats, project path conventions |
-| [`error_helper.py`](../skills/ppt-master/scripts/error_helper.py) | User-facing error message templates |
+| [`image_backends/backend_common.py`](../../skills/ppt-master/scripts/image_backends/backend_common.py) | HTTP download, retry, image format detection, save-with-Pillow-transcode |
+| [`image_sources/provider_common.py`](../../skills/ppt-master/scripts/image_sources/provider_common.py) | License classification, query simplification, scoring, attribution text, dataclasses |
+| [`project_utils.py`](../../skills/ppt-master/scripts/project_utils.py) | Canvas formats, project path conventions |
+| [`error_helper.py`](../../skills/ppt-master/scripts/error_helper.py) | User-facing error message templates |
+| [`console_encoding.py`](../../skills/ppt-master/scripts/console_encoding.py) | `configure_utf8_stdio()` — force UTF-8 console for CLI entries (§4) |
 
 **Forbidden — duplicating logic that exists in a shared helper**. If a helper is missing a feature, extend the helper, don't fork it inside your new script.
 
@@ -321,7 +335,7 @@ Existing files take precedence. If a current script contradicts a rule here, dec
 
 | If you're writing... | Model after |
 |---|---|
-| A small CLI utility | [`total_md_split.py`](../skills/ppt-master/scripts/total_md_split.py), [`gemini_watermark_remover.py`](../skills/ppt-master/scripts/gemini_watermark_remover.py) |
-| A multi-backend / dispatcher CLI | [`image_search.py`](../skills/ppt-master/scripts/image_search.py), [`image_gen.py`](../skills/ppt-master/scripts/image_gen.py) |
-| A library / shared helper | [`image_sources/provider_common.py`](../skills/ppt-master/scripts/image_sources/provider_common.py), [`image_backends/backend_common.py`](../skills/ppt-master/scripts/image_backends/backend_common.py) |
-| A class-based checker / validator | [`svg_quality_checker.py`](../skills/ppt-master/scripts/svg_quality_checker.py) |
+| A small CLI utility | [`total_md_split.py`](../../skills/ppt-master/scripts/total_md_split.py), [`gemini_watermark_remover.py`](../../skills/ppt-master/scripts/gemini_watermark_remover.py) |
+| A multi-backend / dispatcher CLI | [`image_search.py`](../../skills/ppt-master/scripts/image_search.py), [`image_gen.py`](../../skills/ppt-master/scripts/image_gen.py) |
+| A library / shared helper | [`image_sources/provider_common.py`](../../skills/ppt-master/scripts/image_sources/provider_common.py), [`image_backends/backend_common.py`](../../skills/ppt-master/scripts/image_backends/backend_common.py) |
+| A class-based checker / validator | [`svg_quality_checker.py`](../../skills/ppt-master/scripts/svg_quality_checker.py) |
