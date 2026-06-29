@@ -1400,6 +1400,14 @@ function setStatus(status) {
 
   const display = document.getElementById('job-status-display');
   if (display) display.innerHTML = badge;
+
+  // Disable the Generate button while a job is active
+  const btn = document.getElementById('generate-btn');
+  if (btn) {
+    const busy = status === 'running' || status === 'queued' || status === 'confirm_pending';
+    btn.disabled = busy;
+    btn.title = busy ? 'A job is already running' : '';
+  }
 }
 
 // ── File handling ──────────────────────────────────────────────────────────

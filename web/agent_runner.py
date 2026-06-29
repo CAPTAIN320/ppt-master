@@ -140,6 +140,15 @@ async def run_job(
 
     while iteration < max_iterations:
         iteration += 1
+
+        # Cooperative cancellation check — runs before every LLM call so a
+        # delete request is honoured at the start of the next iteration.
+        if store.is_cancelled(job_id):
+            await store.append_log(job_id, "\n[Agent] Job cancelled.\n")
+            store.set_status(job_id, "error")
+            store.set_error(job_id, "Job cancelled by user")
+            return
+
         await store.append_log(job_id, f"\n[Agent] Iteration {iteration}...\n")
 
         outgoing = [{"role": "system", "content": system_prompt}] + _strip_thinking_content_blocks(messages)

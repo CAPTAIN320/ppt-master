@@ -69,6 +69,9 @@ _init_db()
 # Per-job asyncio events for the confirm gate
 _confirm_events: dict[str, asyncio.Event] = {}
 
+# Per-job asyncio events for cooperative cancellation
+_cancel_events: dict[str, asyncio.Event] = {}
+
 # Per-job log queues for WebSocket streaming
 _log_queues: dict[str, asyncio.Queue] = {}
 
@@ -84,6 +87,7 @@ class JobStore:
             )
             conn.commit()
         _confirm_events[job_id] = asyncio.Event()
+        _cancel_events[job_id] = asyncio.Event()
         _log_queues[job_id] = asyncio.Queue()
         return job_id
 
@@ -323,6 +327,17 @@ class JobStore:
             conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
             conn.commit()
 
+    def cancel_job(self, job_id: str) -> None:
+        """Signal the agent runner to stop on its next iteration."""
+        if job_id in _cancel_events:
+            _cancel_events[job_id].set()
+
+    def is_cancelled(self, job_id: str) -> bool:
+        """Return True if the job has been cancelled."""
+        event = _cancel_events.get(job_id)
+        return event is not None and event.is_set()
+
     def cleanup(self, job_id: str) -> None:
         _confirm_events.pop(job_id, None)
+        _cancel_events.pop(job_id, None)
         _log_queues.pop(job_id, None)

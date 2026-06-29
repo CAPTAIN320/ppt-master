@@ -120,12 +120,18 @@ async def delete_job(job_id: str):
     """Delete a job: remove project directory from disk (if present) and DB row."""
     job = store.get_job(job_id)
     if job is None:
-        # Try treating job_id as a project directory name (synthetic orphan entry)
+        # Try treating job_id as a project directory name (synthetic orphan entry).
+        # Signal cancellation even for orphan entries — the cancel event may exist
+        # if the job was recently running before the DB row was cleaned up.
+        store.cancel_job(job_id)
         orphan_dir = REPO_ROOT / "projects" / job_id
         if orphan_dir.is_dir():
             shutil.rmtree(orphan_dir, ignore_errors=True)
             return JSONResponse({"ok": True})
         raise HTTPException(status_code=404, detail="Job not found")
+
+    # Signal the agent loop to stop on its next iteration before touching disk.
+    store.cancel_job(job_id)
 
     # Remove project directory if it exists
     project_path = job.get("project_path")
