@@ -26,6 +26,49 @@ from .tools import TOOL_DEFINITIONS, dispatch_tool
 REPO_ROOT = Path("/app")
 
 
+def _strip_thinking_content_blocks(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Strip ``thinking``/``thought`` content blocks from the message history.
+
+    Some models (e.g. Claude extended-thinking) embed reasoning blocks inside
+    the ``content`` list of assistant messages.  These must be removed before
+    re-sending the history or certain providers will reject the request.
+
+    NOTE: This function intentionally does NOT touch ``thought_signature`` on
+    tool-call objects.  Gemini thinking models require ``thought_signature`` to
+    be PRESENT in the history — stripping it causes the
+    "missing a thought_signature" HTTP 400.  Gemini tool calls are assembled
+    via the non-streaming path (see ``_call_llm_non_streaming``) which
+    preserves ``thought_signature`` from ``model_extra``.
+    """
+    sanitized: list[dict[str, Any]] = []
+    for msg in messages:
+        msg = dict(msg)  # shallow copy — don't mutate the live history
+
+        # ── Strip thinking/thought content blocks ─────────────────────────
+        if isinstance(msg.get("content"), list):
+            msg["content"] = [
+                block
+                for block in msg["content"]
+                if not (
+                    isinstance(block, dict)
+                    and block.get("type") in ("thinking", "thought")
+                )
+            ]
+            # If all blocks were thinking blocks, collapse to None so the
+            # message stays valid (assistant with only tool_calls).
+            if not msg["content"]:
+                msg["content"] = None
+
+        sanitized.append(msg)
+    return sanitized
+
+
+def _is_gemini_model(model: str) -> bool:
+    """Return True if the model name indicates a Gemini model."""
+    return "gemini" in model.lower()
+
+
 def _build_user_message(
     topic: str,
     canvas_format: str,
@@ -91,61 +134,114 @@ async def run_job(
     max_iterations = 200  # safety cap
     iteration = 0
 
+    use_non_streaming = _is_gemini_model(model)
+
     while iteration < max_iterations:
         iteration += 1
         await store.append_log(job_id, f"\n[Agent] Iteration {iteration}...\n")
 
-        # ── Stream LLM response ───────────────────────────────────────────────
+        outgoing = [{"role": "system", "content": system_prompt}] + _strip_thinking_content_blocks(messages)
+
         text_buffer = ""
-        tool_calls_raw: dict[int, dict] = {}  # index → partial tool call
+        tool_calls_list: list[dict[str, Any]] = []
 
         try:
-            stream = await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "system", "content": system_prompt}] + messages,
-                tools=TOOL_DEFINITIONS,
-                tool_choice="auto",
-                max_tokens=16000,
-                stream=True,
-            )
-
             await store.append_log(
                 job_id,
-                f"[Agent] Calling {model} at {agent_base_url} with {len(messages)} messages\n",
+                f"[Agent] Calling {model} at {agent_base_url} with {len(messages)} messages"
+                f" ({'non-streaming' if use_non_streaming else 'streaming'})\n",
             )
 
-            async for chunk in stream:
-                choice = chunk.choices[0] if chunk.choices else None
-                if choice is None:
-                    continue
+            if use_non_streaming:
+                # ── Non-streaming path (Gemini) ───────────────────────────────
+                # Gemini thinking models attach ``thought_signature`` to tool
+                # calls.  We use non-streaming so the full response object is
+                # returned intact, then capture ``thought_signature`` from
+                # ``model_extra`` below and round-trip it in the history.
+                # This avoids the "missing a thought_signature" HTTP 400.
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=outgoing,
+                    tools=TOOL_DEFINITIONS,
+                    tool_choice="auto",
+                    max_tokens=16000,
+                    stream=False,
+                )
+                choice = response.choices[0] if response.choices else None
+                if choice is not None:
+                    msg = choice.message
+                    text_buffer = msg.content or ""
+                    if text_buffer:
+                        await store.append_log(job_id, text_buffer)
 
-                delta = choice.delta
-
-                # Collect text
-                if delta.content:
-                    text_buffer += delta.content
-                    await store.append_log(job_id, delta.content)
-
-                # Collect tool call fragments
-                if delta.tool_calls:
-                    for tc_delta in delta.tool_calls:
-                        idx = tc_delta.index
-                        if idx not in tool_calls_raw:
-                            tool_calls_raw[idx] = {
-                                "id": tc_delta.id or "",
+                    if msg.tool_calls:
+                        for tc in msg.tool_calls:
+                            tc_dict: dict[str, Any] = {
+                                "id": tc.id or "",
                                 "type": "function",
-                                "function": {"name": "", "arguments": ""},
+                                "function": {
+                                    "name": tc.function.name or "",
+                                    "arguments": tc.function.arguments or "",
+                                },
                             }
-                        if tc_delta.id:
-                            tool_calls_raw[idx]["id"] = tc_delta.id
-                        if tc_delta.function:
-                            if tc_delta.function.name:
-                                tool_calls_raw[idx]["function"]["name"] += tc_delta.function.name
-                            if tc_delta.function.arguments:
-                                tool_calls_raw[idx]["function"]["arguments"] += tc_delta.function.arguments
+                            # Preserve thought_signature and any other
+                            # Gemini-specific extra fields so the history
+                            # round-trips correctly on the next turn.
+                            # Guard with hasattr+truthiness: model_extra may be
+                            # None or {} depending on the Pydantic version.
+                            if hasattr(tc, "model_extra") and tc.model_extra:
+                                tc_dict.update(tc.model_extra)
+                            if hasattr(tc, "function") and hasattr(tc.function, "model_extra") and tc.function.model_extra:
+                                tc_dict["function"].update(tc.function.model_extra)
+                            tool_calls_list.append(tc_dict)
 
-                if choice.finish_reason == "stop":
-                    break
+            else:
+                # ── Streaming path (non-Gemini) ───────────────────────────────
+                tool_calls_raw: dict[int, dict] = {}  # index → partial tool call
+
+                stream = await client.chat.completions.create(
+                    model=model,
+                    messages=outgoing,
+                    tools=TOOL_DEFINITIONS,
+                    tool_choice="auto",
+                    max_tokens=16000,
+                    stream=True,
+                )
+
+                async for chunk in stream:
+                    choice = chunk.choices[0] if chunk.choices else None
+                    if choice is None:
+                        continue
+
+                    delta = choice.delta
+
+                    # Collect text
+                    if delta.content:
+                        text_buffer += delta.content
+                        await store.append_log(job_id, delta.content)
+
+                    # Collect tool call fragments
+                    if delta.tool_calls:
+                        for tc_delta in delta.tool_calls:
+                            idx = tc_delta.index
+                            if idx not in tool_calls_raw:
+                                tool_calls_raw[idx] = {
+                                    "id": tc_delta.id or "",
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                }
+                            if tc_delta.id:
+                                tool_calls_raw[idx]["id"] = tc_delta.id
+                            if tc_delta.function:
+                                if tc_delta.function.name:
+                                    tool_calls_raw[idx]["function"]["name"] += tc_delta.function.name
+                                if tc_delta.function.arguments:
+                                    tool_calls_raw[idx]["function"]["arguments"] += tc_delta.function.arguments
+
+                    if choice.finish_reason == "stop":
+                        break
+
+                tool_calls_list = [tool_calls_raw[i] for i in sorted(tool_calls_raw.keys())]
 
         except Exception as exc:
             import traceback
@@ -164,8 +260,6 @@ async def run_job(
             return
 
         # ── Build assistant message ───────────────────────────────────────────
-        tool_calls_list = [tool_calls_raw[i] for i in sorted(tool_calls_raw.keys())]
-
         assistant_msg: dict[str, Any] = {"role": "assistant", "content": text_buffer or None}
         if tool_calls_list:
             assistant_msg["tool_calls"] = tool_calls_list
