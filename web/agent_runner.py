@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -308,18 +307,22 @@ async def run_job(
             )
 
     # ── Find and signal the exported PPTX ────────────────────────────────────
-    exports_dir = REPO_ROOT / "exports"
-    pptx_files = sorted(
-        exports_dir.glob("**/*.pptx"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
+    # Look for the PPTX in the project's own exports/ subdirectory.
+    # No copy to the global exports/ directory is performed.
+    job_meta = store.get_job(job_id)
+    project_path_str = job_meta.get("project_path") if job_meta else None
+    pptx_files: list[Path] = []
+    if project_path_str:
+        proj_exports = Path(project_path_str) / "exports"
+        if proj_exports.is_dir():
+            pptx_files = sorted(
+                proj_exports.glob("*.pptx"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
 
     if pptx_files:
         latest = pptx_files[0]
-        dest = exports_dir / f"{job_id}.pptx"
-        if latest != dest:
-            shutil.copy2(latest, dest)
         store.set_status(job_id, "done")
         await store.push_event(
             job_id,
@@ -335,7 +338,7 @@ async def run_job(
             job_id,
             {
                 "type": "job_done",
-                "download_url": None,
-                "message": "Pipeline complete. No PPTX found in exports/.",
+                "download_url": f"/jobs/{job_id}/download",
+                "message": "Pipeline complete. PPTX will be generated on demand.",
             },
         )
