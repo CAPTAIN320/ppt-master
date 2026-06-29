@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime
@@ -26,6 +27,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 DB_PATH = Path("/app/projects/.job_store.db")
+PROJECTS_DIR = Path("/app/projects")
+EXPORTS_DIR = Path("/app/exports")
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -46,10 +49,18 @@ def _init_db() -> None:
                 confirm_data TEXT,
                 confirm_result TEXT,
                 error_message TEXT,
+                topic TEXT,
+                slide_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
         """)
+        # Migrate existing DBs that lack the new columns
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "topic" not in existing:
+            conn.execute("ALTER TABLE jobs ADD COLUMN topic TEXT")
+        if "slide_count" not in existing:
+            conn.execute("ALTER TABLE jobs ADD COLUMN slide_count INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
 
@@ -63,13 +74,13 @@ _log_queues: dict[str, asyncio.Queue] = {}
 
 
 class JobStore:
-    def create_job(self) -> str:
+    def create_job(self, topic: str = "") -> str:
         job_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
         with _get_conn() as conn:
             conn.execute(
-                "INSERT INTO jobs (id, status, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (job_id, "queued", now, now),
+                "INSERT INTO jobs (id, status, topic, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (job_id, "queued", topic, now, now),
             )
             conn.commit()
         _confirm_events[job_id] = asyncio.Event()
@@ -92,6 +103,15 @@ class JobStore:
             )
             conn.commit()
 
+    def set_topic(self, job_id: str, topic: str) -> None:
+        now = datetime.utcnow().isoformat()
+        with _get_conn() as conn:
+            conn.execute(
+                "UPDATE jobs SET topic = ?, updated_at = ? WHERE id = ?",
+                (topic, now, job_id),
+            )
+            conn.commit()
+
     def set_project_path(self, job_id: str, path: str) -> None:
         now = datetime.utcnow().isoformat()
         with _get_conn() as conn:
@@ -100,6 +120,170 @@ class JobStore:
                 (path, now, job_id),
             )
             conn.commit()
+
+    def increment_slide_count(self, job_id: str) -> None:
+        now = datetime.utcnow().isoformat()
+        with _get_conn() as conn:
+            conn.execute(
+                "UPDATE jobs SET slide_count = slide_count + 1, updated_at = ? WHERE id = ?",
+                (now, job_id),
+            )
+            conn.commit()
+
+    def list_jobs(self) -> list[dict]:
+        """Return all completed (status='done') jobs sorted by creation time descending.
+
+        Also scans the filesystem for orphan project directories (those with svg_output/
+        or svg_final/ subdirectories) and orphan PPTX files in exports/ that have no
+        corresponding DB entry, and includes them as synthetic job entries.
+        """
+        with _get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, status, topic, project_path, slide_count, created_at, updated_at "
+                "FROM jobs WHERE status = 'done' ORDER BY created_at DESC"
+            ).fetchall()
+        result = []
+        # Use directory *basenames* for deduplication so that Docker-internal paths
+        # (/app/projects/foo) and host-resolved paths (/host/path/projects/foo) both
+        # reduce to the same key "foo" and are not double-counted.
+        known_project_names: set[str] = set()
+        for row in rows:
+            job = dict(row)
+            job["download_url"] = f"/jobs/{job['id']}/download"
+
+            # Bug fix: if slide_count is 0 but the project directory has SVG files,
+            # recalculate from disk so the Library shows correct thumbnails and counts.
+            if job.get("slide_count", 0) == 0 and job.get("project_path"):
+                proj_dir = Path(job["project_path"])
+                # Remap Docker-internal /app/projects/... to the actual PROJECTS_DIR
+                # in case this process is running outside Docker (e.g. tests on host).
+                if not proj_dir.exists() and proj_dir.parts[:3] == ('/', 'app', 'projects'):
+                    proj_dir = PROJECTS_DIR / proj_dir.name
+                svg_dir = proj_dir / "svg_final"
+                if not svg_dir.is_dir():
+                    svg_dir = proj_dir / "svg_output"
+                if svg_dir.is_dir():
+                    count = len(list(svg_dir.glob("*.svg")))
+                    if count > 0:
+                        job["slide_count"] = count
+                        # Persist the corrected count so future calls skip this work.
+                        try:
+                            now = datetime.utcnow().isoformat()
+                            with _get_conn() as conn:
+                                conn.execute(
+                                    "UPDATE jobs SET slide_count = ?, updated_at = ? WHERE id = ?",
+                                    (count, now, job["id"]),
+                                )
+                                conn.commit()
+                        except Exception:
+                            pass  # Non-fatal; count is correct in memory for this call
+
+            result.append(job)
+            if job.get("project_path"):
+                known_project_names.add(Path(job["project_path"]).name)
+
+        # ── Orphan project directories ────────────────────────────────────────
+        # Scan /app/projects/ for directories that have svg_output/ or svg_final/
+        # but are not already tracked in the DB.
+        if PROJECTS_DIR.exists():
+            for proj_dir in sorted(PROJECTS_DIR.iterdir()):
+                if not proj_dir.is_dir():
+                    continue
+                # Skip hidden dirs (e.g. uploads) and the uploads dir itself
+                if proj_dir.name.startswith(".") or proj_dir.name == "uploads":
+                    continue
+                has_svgs = (proj_dir / "svg_output").is_dir() or (proj_dir / "svg_final").is_dir()
+                if not has_svgs:
+                    continue
+                # Deduplicate by basename so Docker-internal paths stored in the DB
+                # (/app/projects/foo) match the filesystem entry (foo) regardless of
+                # where the volume is mounted on the host.
+                if proj_dir.name in known_project_names:
+                    continue
+
+                # Count slides
+                svg_dir = proj_dir / "svg_final"
+                if not svg_dir.is_dir():
+                    svg_dir = proj_dir / "svg_output"
+                slide_count = len(list(svg_dir.glob("*.svg")))
+
+                # Use directory mtime as created_at
+                try:
+                    mtime = proj_dir.stat().st_mtime
+                    created_at = datetime.utcfromtimestamp(mtime).isoformat()
+                except OSError:
+                    created_at = datetime.utcnow().isoformat()
+
+                # Derive a human-readable topic from the directory name
+                # Strip leading format prefix like "ppt169_" if present
+                name = proj_dir.name
+                name = re.sub(r'^ppt\d+_', '', name)
+                topic = name.replace("_", " ")
+
+                # Use the project directory name as the synthetic job ID so that
+                # /jobs/{job_id}/slides/{n} can fall back to it.
+                synthetic_id = proj_dir.name
+
+                # Find a matching PPTX in exports/ (name contains the project dir name)
+                download_url = f"/jobs/{synthetic_id}/download"
+
+                result.append({
+                    "id": synthetic_id,
+                    "status": "done",
+                    "topic": topic,
+                    "project_path": str(proj_dir),
+                    "slide_count": slide_count,
+                    "created_at": created_at,
+                    "updated_at": created_at,
+                    "download_url": download_url,
+                    "synthetic": True,
+                })
+                known_project_names.add(proj_dir.name)
+
+        # ── Orphan PPTX files in exports/ ────────────────────────────────────
+        # For PPTX files whose stem is not a known job ID and not already covered
+        # by an orphan project above, add a minimal synthetic entry.
+        known_ids = {job["id"] for job in result}
+        if EXPORTS_DIR.exists():
+            for pptx in sorted(EXPORTS_DIR.glob("*.pptx"), key=lambda p: p.stat().st_mtime, reverse=True):
+                stem = pptx.stem
+                if stem in known_ids:
+                    continue
+                # NOTE: do NOT skip UUID-shaped stems here.  After a Docker rebuild the
+                # DB is empty, so UUID-named exports have no corresponding DB row and
+                # must be surfaced as synthetic entries just like any other orphan file.
+                # The `known_ids` check above already handles deduplication for jobs
+                # that ARE in the DB.
+
+                try:
+                    mtime = pptx.stat().st_mtime
+                    created_at = datetime.utcfromtimestamp(mtime).isoformat()
+                except OSError:
+                    created_at = datetime.utcnow().isoformat()
+
+                # Derive topic: strip trailing _YYYYMMDD_HHMMSS timestamp if present
+                name = stem
+                name = re.sub(r'_\d{8}_\d{6}$', '', name)
+                name = re.sub(r'_\d{8}$', '', name)
+                topic = name.replace("_", " ")
+
+                synthetic_id = stem
+                result.append({
+                    "id": synthetic_id,
+                    "status": "done",
+                    "topic": topic,
+                    "project_path": None,
+                    "slide_count": 0,
+                    "created_at": created_at,
+                    "updated_at": created_at,
+                    "download_url": f"/exports/{pptx.name}",
+                    "synthetic": True,
+                })
+                known_ids.add(synthetic_id)
+
+        # Sort all results by created_at descending
+        result.sort(key=lambda j: j.get("created_at") or "", reverse=True)
+        return result
 
     def set_error(self, job_id: str, message: str) -> None:
         now = datetime.utcnow().isoformat()
