@@ -189,6 +189,14 @@ async def dispatch_tool(
     elif name == "run_script":
         script = args["script"]
         script_args = args.get("args", [])
+
+        # Intercept confirm_ui/server.py — web UI uses confirm_gate tool instead
+        if "confirm_ui" in script:
+            return {
+                "output": "[Web UI] confirm_ui/server.py is not used in web mode. Call the confirm_gate tool directly to trigger the Eight Confirmations UI.",
+                "returncode": 0,
+            }
+
         script_path = _resolve_path(script)
         cmd = ["python3", str(script_path)] + [str(a) for a in script_args]
         await store.append_log(job_id, f"\n$ {' '.join(cmd)}\n")
