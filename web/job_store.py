@@ -150,51 +150,40 @@ class JobStore:
         for row in rows:
             job = dict(row)
 
-            # ── Stale-entry guard ─────────────────────────────────────────────
-            # Jobs with no project_path have no slides to show; skip them.
-            if not job.get("project_path"):
-                continue
-
-            proj_dir = Path(job["project_path"])
-            # Remap Docker-internal /app/projects/... to the actual PROJECTS_DIR
-            # in case this process is running outside Docker (e.g. tests on host).
-            if not proj_dir.exists() and proj_dir.parts[:3] == ('/', 'app', 'projects'):
-                proj_dir = PROJECTS_DIR / proj_dir.name
-
-            # If the project directory no longer exists on disk, skip this job.
-            if not proj_dir.exists():
-                continue
-
-            # If the project directory has no SVG files in svg_final/ or
-            # svg_output/, there are no slides to show; skip this job.
-            svg_dir = proj_dir / "svg_final"
-            if not svg_dir.is_dir():
-                svg_dir = proj_dir / "svg_output"
-            if not svg_dir.is_dir() or not any(svg_dir.glob("*.svg")):
-                continue
-
             job["download_url"] = f"/jobs/{job['id']}/download"
 
-            # If slide_count is 0 but SVG files exist, recalculate from disk
-            # so the Library shows correct thumbnails and counts.
-            if job.get("slide_count", 0) == 0:
-                count = len(list(svg_dir.glob("*.svg")))
-                if count > 0:
-                    job["slide_count"] = count
-                    # Persist the corrected count so future calls skip this work.
-                    try:
-                        now = datetime.utcnow().isoformat()
-                        with _get_conn() as conn:
-                            conn.execute(
-                                "UPDATE jobs SET slide_count = ?, updated_at = ? WHERE id = ?",
-                                (count, now, job["id"]),
-                            )
-                            conn.commit()
-                    except Exception:
-                        pass  # Non-fatal; count is correct in memory for this call
+            # If slide_count is 0, try to recalculate from disk if the project
+            # directory exists and has SVG files.
+            if job.get("slide_count", 0) == 0 and job.get("project_path"):
+                proj_dir = Path(job["project_path"])
+                # Remap Docker-internal /app/projects/... to the actual PROJECTS_DIR
+                # in case this process is running outside Docker (e.g. tests on host).
+                if not proj_dir.exists() and proj_dir.parts[:3] == ('/', 'app', 'projects'):
+                    proj_dir = PROJECTS_DIR / proj_dir.name
+
+                if proj_dir.exists():
+                    svg_dir = proj_dir / "svg_final"
+                    if not svg_dir.is_dir():
+                        svg_dir = proj_dir / "svg_output"
+                    if svg_dir.is_dir():
+                        count = len(list(svg_dir.glob("*.svg")))
+                        if count > 0:
+                            job["slide_count"] = count
+                            # Persist the corrected count so future calls skip this work.
+                            try:
+                                now = datetime.utcnow().isoformat()
+                                with _get_conn() as conn:
+                                    conn.execute(
+                                        "UPDATE jobs SET slide_count = ?, updated_at = ? WHERE id = ?",
+                                        (count, now, job["id"]),
+                                    )
+                                    conn.commit()
+                            except Exception:
+                                pass  # Non-fatal; count is correct in memory for this call
 
             result.append(job)
-            known_project_names.add(Path(job["project_path"]).name)
+            if job.get("project_path"):
+                known_project_names.add(Path(job["project_path"]).name)
 
         # ── Orphan project directories ────────────────────────────────────────
         # Scan /app/projects/ for directories that have svg_output/ or svg_final/
@@ -327,6 +316,12 @@ class JobStore:
         if job and job["confirm_result"]:
             return json.loads(job["confirm_result"])
         return {}
+
+    def delete_job(self, job_id: str) -> None:
+        """Delete the job row from the DB."""
+        with _get_conn() as conn:
+            conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            conn.commit()
 
     def cleanup(self, job_id: str) -> None:
         _confirm_events.pop(job_id, None)

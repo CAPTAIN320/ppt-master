@@ -981,6 +981,20 @@
       color: var(--text);
     }
 
+    .btn-lib-delete {
+      background: transparent;
+      color: var(--text-dim);
+      border: 1px solid var(--border);
+      font-size: 11px;
+      padding: 7px 8px;
+      flex: 0 0 auto;
+    }
+    .btn-lib-delete:hover:not(:disabled) {
+      background: rgba(232,85,85,0.12);
+      color: var(--error);
+      border-color: rgba(232,85,85,0.4);
+    }
+
     /* ── Spinner ──────────────────────────────────────────────────────────── */
     .spinner {
       width: 16px;
@@ -1995,6 +2009,7 @@ async function loadLibrary() {
 
     const card = document.createElement('div');
     card.className = 'library-card';
+    card.dataset.jobId = job.id;
     card.innerHTML = `
       <div class="library-card-thumb">
         ${thumbUrl
@@ -2014,6 +2029,7 @@ async function loadLibrary() {
       <div class="library-card-actions">
         ${slideCount > 0 ? `<button class="btn btn-view-slides" onclick="loadJobSlides('${job.id}')">▶ View Slides</button>` : ''}
         <button class="btn btn-lib-download" id="dl-btn-${job.id}" onclick="downloadPresentation('${job.id}', '${escAttr(title)}')" title="Download PPTX">⬇ PPTX</button>
+        <button class="btn btn-lib-delete" onclick="deletePresentation('${job.id}')" title="Delete presentation">🗑</button>
       </div>
     `;
     grid.appendChild(card);
@@ -2075,6 +2091,43 @@ async function downloadPresentation(jobId, title) {
       btn.disabled = false;
       btn.innerHTML = originalHtml || '⬇ PPTX';
     }
+  }
+}
+
+async function deletePresentation(jobId) {
+  const confirmed = confirm('Delete this presentation? This will remove the project files and cannot be undone.');
+  if (!confirmed) return;
+
+  try {
+    const resp = await fetch(`/jobs/${jobId}`, { method: 'DELETE' });
+    if (!resp.ok) {
+      let detail = `HTTP ${resp.status}`;
+      try {
+        const err = await resp.json();
+        detail = err.detail || detail;
+      } catch (_) {}
+      throw new Error(detail);
+    }
+
+    // Remove the card from the DOM
+    const card = document.querySelector(`.library-card[data-job-id="${jobId}"]`);
+    if (card) card.remove();
+
+    // If the grid is now empty, show the empty state
+    const grid = document.getElementById('library-grid');
+    if (grid && grid.children.length === 0) {
+      const empty = document.getElementById('library-empty');
+      if (empty) {
+        empty.style.display = 'flex';
+        empty.querySelector('.library-empty-text').textContent = 'No completed presentations yet.';
+      }
+    }
+
+    // Invalidate library cache so next visit re-fetches
+    libraryLoaded = false;
+
+  } catch (err) {
+    showToast(`Delete failed: ${err.message}`);
   }
 }
 

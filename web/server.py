@@ -2,16 +2,17 @@
 PPT Master Web Server — FastAPI REST + WebSocket.
 
 Endpoints:
-  GET  /                          Serve the SPA (web/static/index.html)
-  GET  /jobs                      List all completed jobs (Library tab)
-  POST /jobs                      Create a new generation job
-  GET  /jobs/{job_id}             Get job status + metadata
-  WS   /ws/{job_id}               Real-time log + event stream
-  POST /jobs/{job_id}/confirm     Submit Eight Confirmations result
-  GET  /jobs/{job_id}/slides/{n}  Serve SVG thumbnail for slide N
-  GET  /jobs/{job_id}/download    Download the exported .pptx (pre-existing file)
-  POST /jobs/{job_id}/export      Generate PPTX on-demand from SVG files
-  GET  /static/{path}             Serve static files
+  GET    /                          Serve the SPA (web/static/index.html)
+  GET    /jobs                      List all completed jobs (Library tab)
+  POST   /jobs                      Create a new generation job
+  GET    /jobs/{job_id}             Get job status + metadata
+  DELETE /jobs/{job_id}             Delete a job and its project directory
+  WS     /ws/{job_id}               Real-time log + event stream
+  POST   /jobs/{job_id}/confirm     Submit Eight Confirmations result
+  GET    /jobs/{job_id}/slides/{n}  Serve SVG thumbnail for slide N
+  GET    /jobs/{job_id}/download    Download the exported .pptx (pre-existing file)
+  POST   /jobs/{job_id}/export      Generate PPTX on-demand from SVG files
+  GET    /static/{path}             Serve static files
 """
 
 from __future__ import annotations
@@ -109,6 +110,32 @@ async def create_job(
     )
 
     return JSONResponse({"job_id": job_id, "status": "queued"})
+
+
+# ── Job deletion ──────────────────────────────────────────────────────────────
+
+
+@app.delete("/jobs/{job_id}")
+async def delete_job(job_id: str):
+    """Delete a job: remove project directory from disk (if present) and DB row."""
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Remove project directory if it exists
+    project_path = job.get("project_path")
+    if project_path:
+        proj_dir = Path(project_path)
+        # Remap Docker-internal /app/projects/... to the actual mount point when
+        # running outside Docker (e.g. tests on host).
+        if not proj_dir.exists() and proj_dir.parts[:3] == ('/', 'app', 'projects'):
+            proj_dir = REPO_ROOT / "projects" / proj_dir.name
+        if proj_dir.exists():
+            shutil.rmtree(proj_dir, ignore_errors=True)
+
+    store.delete_job(job_id)
+    store.cleanup(job_id)
+    return JSONResponse({"ok": True})
 
 
 # ── Job status ────────────────────────────────────────────────────────────────
