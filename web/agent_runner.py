@@ -76,6 +76,9 @@ async def run_job(
     client = AsyncOpenAI(
         api_key=agent_api_key,
         base_url=agent_base_url,
+        default_headers={
+            "User-Agent": "ppt-master/1.0",
+        },
     )
 
     system_prompt = get_system_prompt()
