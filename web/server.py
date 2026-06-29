@@ -15,15 +15,18 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import mimetypes
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Optional
 
 import aiofiles
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .agent_runner import run_job
@@ -164,9 +167,45 @@ async def submit_confirm(job_id: str, body: dict):
 # ── SVG slide thumbnail ───────────────────────────────────────────────────────
 
 
+_MIME_BY_EXT: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+}
+
+# Matches href="..." or xlink:href="..." where the value is a local path
+_HREF_RE = re.compile(
+    r'((?:xlink:)?href=")([^"]+)(")',
+    re.IGNORECASE,
+)
+
+
+def _inline_svg_images(svg_text: str, svg_dir: Path) -> str:
+    """Replace local file href/xlink:href references with base64 data URIs."""
+
+    def _replace(m: re.Match) -> str:
+        prefix, path_val, suffix = m.group(1), m.group(2), m.group(3)
+        # Skip already-inlined or remote references
+        if path_val.startswith(("data:", "http://", "https://", "#")):
+            return m.group(0)
+        # Resolve relative to the SVG's own directory
+        resolved = (svg_dir / path_val).resolve()
+        if not resolved.exists():
+            return m.group(0)
+        ext = resolved.suffix.lower()
+        mime = _MIME_BY_EXT.get(ext) or (mimetypes.guess_type(str(resolved))[0] or "application/octet-stream")
+        encoded = base64.b64encode(resolved.read_bytes()).decode("ascii")
+        return f'{prefix}data:{mime};base64,{encoded}{suffix}'
+
+    return _HREF_RE.sub(_replace, svg_text)
+
+
 @app.get("/jobs/{job_id}/slides/{slide_number}")
 async def get_slide(job_id: str, slide_number: int):
-    """Serve the SVG file for a given slide number."""
+    """Serve the SVG file for a given slide number, with images inlined as data URIs."""
     job = store.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -185,7 +224,9 @@ async def get_slide(job_id: str, slide_number: int):
         raise HTTPException(status_code=404, detail=f"Slide {slide_number} not found")
 
     svg_file = svgs[slide_number - 1]
-    return FileResponse(str(svg_file), media_type="image/svg+xml")
+    svg_text = svg_file.read_text(encoding="utf-8")
+    svg_text = _inline_svg_images(svg_text, svg_file.parent)
+    return Response(content=svg_text, media_type="image/svg+xml")
 
 
 # ── Debug endpoint ────────────────────────────────────────────────────────────
