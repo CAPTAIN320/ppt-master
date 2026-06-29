@@ -397,35 +397,78 @@ async def debug_test_llm():
 
 @app.get("/jobs/{job_id}/download")
 async def download_pptx(job_id: str):
-    # 1. Exact match: exports/<job_id>.pptx  (DB-tracked jobs use UUID as filename)
-    pptx_path = EXPORTS_DIR / f"{job_id}.pptx"
-    if pptx_path.exists():
+    """Return the exported PPTX for a job.
+
+    Lookup order:
+    1. Newest ``*.pptx`` in ``<project_path>/exports/`` (project-local, preferred).
+    2. On-demand generation via ``svg_to_pptx.py`` when no pre-built file exists.
+    """
+    # 1. Resolve project directory from DB (or fall back to directory name).
+    job = store.get_job(job_id)
+    if job is not None:
+        project_path_str = job.get("project_path")
+        if not project_path_str:
+            raise HTTPException(status_code=404, detail="Project path not set for this job")
+        proj_dir = Path(project_path_str)
+        # Remap Docker-internal /app/projects/... to the actual mount point when
+        # running outside Docker (e.g. tests on host).
+        if not proj_dir.exists() and proj_dir.parts[:3] == ('/', 'app', 'projects'):
+            proj_dir = REPO_ROOT / "projects" / proj_dir.name
+    else:
+        # Fallback: treat job_id as a project directory name (orphan entries).
+        proj_dir = REPO_ROOT / "projects" / job_id
+        if not proj_dir.is_dir():
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    if not proj_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"Project directory not found: {proj_dir}")
+
+    # 2. Look for a pre-built PPTX in the project's own exports/ subdirectory.
+    proj_exports = proj_dir / "exports"
+    pptx_candidates: list[Path] = []
+    if proj_exports.is_dir():
+        pptx_candidates = sorted(
+            proj_exports.glob("*.pptx"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+
+    if pptx_candidates:
+        pptx_path = pptx_candidates[0]
         return FileResponse(
             str(pptx_path),
             media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
             filename=pptx_path.name,
         )
 
-    # 2. Orphan project: look for any PPTX whose stem starts with job_id (project dir name)
-    #    e.g. project dir "ppt169_foo_bar" → exports/ppt169_foo_bar_20260629.pptx
-    candidates = sorted(
-        [p for p in EXPORTS_DIR.glob("*.pptx") if p.stem == job_id or p.stem.startswith(job_id + "_")],
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
+    # 3. No pre-built file — generate on demand via svg_to_pptx.py.
+    script_path = REPO_ROOT / "skills" / "ppt-master" / "scripts" / "svg_to_pptx.py"
+    proc = await asyncio.create_subprocess_exec(
+        "python3", str(script_path), str(proj_dir),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
-    if candidates:
-        pptx_path = candidates[0]
-        return FileResponse(
-            str(pptx_path),
-            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            filename=pptx_path.name,
+    stdout_bytes, stderr_bytes = await proc.communicate()
+
+    if proc.returncode != 0:
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+        raise HTTPException(
+            status_code=500,
+            detail=f"svg_to_pptx.py failed (exit {proc.returncode}):\n{stderr_text}",
         )
 
-    # 3. Last resort: newest PPTX in exports/
-    all_candidates = sorted(EXPORTS_DIR.glob("*.pptx"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not all_candidates:
-        raise HTTPException(status_code=404, detail="PPTX not found")
-    pptx_path = all_candidates[0]
+    # Re-scan after generation.
+    if proj_exports.is_dir():
+        pptx_candidates = sorted(
+            proj_exports.glob("*.pptx"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+
+    if not pptx_candidates:
+        raise HTTPException(status_code=500, detail="Export succeeded but no PPTX file was found")
+
+    pptx_path = pptx_candidates[0]
     return FileResponse(
         str(pptx_path),
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
