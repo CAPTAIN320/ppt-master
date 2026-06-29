@@ -1500,6 +1500,9 @@ async function startJob() {
     btnIcon.textContent = '⏳';
     btnText.textContent = 'Running…';
 
+    // Persist job ID so a page refresh can reconnect
+    localStorage.setItem('pptmaster_active_job', state.jobId);
+
     // Connect WebSocket
     connectWebSocket(state.jobId);
     switchTab('log');
@@ -1587,6 +1590,7 @@ function handleEvent(event) {
       resetGenerateBtn();
       // Invalidate the Library cache so the next visit picks up this new entry.
       libraryLoaded = false;
+      localStorage.removeItem('pptmaster_active_job');
       break;
 
     case 'error':
@@ -1594,6 +1598,7 @@ function handleEvent(event) {
       appendLog(`\n❌ Error: ${event.message}\n`, 'log-error');
       showToast(event.message);
       resetGenerateBtn();
+      localStorage.removeItem('pptmaster_active_job');
       break;
 
     default:
@@ -1921,6 +1926,7 @@ function resetMonitor() {
   state.slideCount = 0;
   state.confirmData = null;
   state.downloadUrl = null;
+  localStorage.removeItem('pptmaster_active_job');
 }
 
 function resetGenerateBtn() {
@@ -2196,7 +2202,35 @@ async function loadJobSlides(jobId) {
 initThemeToggle();
 initSidebar();
 setStatus('idle');
-loadLibrary();
+
+// Auto-reconnect to in-progress job after page refresh
+const savedJobId = localStorage.getItem('pptmaster_active_job');
+if (savedJobId) {
+  // Check if the job is still running
+  fetch(`/jobs/${savedJobId}`)
+    .then(r => r.json())
+    .then(job => {
+      if (job.status === 'running' || job.status === 'confirm_pending' || job.status === 'queued') {
+        // Reconnect to the job
+        state.jobId = savedJobId;
+        document.getElementById('job-info').style.display = 'block';
+        document.getElementById('job-id-display').textContent = savedJobId;
+        setStatus(job.status);
+        switchTab('log');
+        connectWebSocket(savedJobId);
+      } else {
+        // Job is done or errored — clear the stored ID
+        localStorage.removeItem('pptmaster_active_job');
+        loadLibrary();
+      }
+    })
+    .catch(() => {
+      localStorage.removeItem('pptmaster_active_job');
+      loadLibrary();
+    });
+} else {
+  loadLibrary();
+}
 </script>
 </body>
 </html>
