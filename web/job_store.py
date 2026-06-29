@@ -134,8 +134,8 @@ class JobStore:
         """Return all completed (status='done') jobs sorted by creation time descending.
 
         Also scans the filesystem for orphan project directories (those with svg_output/
-        or svg_final/ subdirectories) and orphan PPTX files in exports/ that have no
-        corresponding DB entry, and includes them as synthetic job entries.
+        or svg_final/ subdirectories) that have no corresponding DB entry, and includes
+        them as synthetic job entries.
         """
         with _get_conn() as conn:
             rows = conn.execute(
@@ -239,47 +239,6 @@ class JobStore:
                     "synthetic": True,
                 })
                 known_project_names.add(proj_dir.name)
-
-        # ── Orphan PPTX files in exports/ ────────────────────────────────────
-        # For PPTX files whose stem is not a known job ID and not already covered
-        # by an orphan project above, add a minimal synthetic entry.
-        known_ids = {job["id"] for job in result}
-        if EXPORTS_DIR.exists():
-            for pptx in sorted(EXPORTS_DIR.glob("*.pptx"), key=lambda p: p.stat().st_mtime, reverse=True):
-                stem = pptx.stem
-                if stem in known_ids:
-                    continue
-                # NOTE: do NOT skip UUID-shaped stems here.  After a Docker rebuild the
-                # DB is empty, so UUID-named exports have no corresponding DB row and
-                # must be surfaced as synthetic entries just like any other orphan file.
-                # The `known_ids` check above already handles deduplication for jobs
-                # that ARE in the DB.
-
-                try:
-                    mtime = pptx.stat().st_mtime
-                    created_at = datetime.utcfromtimestamp(mtime).isoformat()
-                except OSError:
-                    created_at = datetime.utcnow().isoformat()
-
-                # Derive topic: strip trailing _YYYYMMDD_HHMMSS timestamp if present
-                name = stem
-                name = re.sub(r'_\d{8}_\d{6}$', '', name)
-                name = re.sub(r'_\d{8}$', '', name)
-                topic = name.replace("_", " ")
-
-                synthetic_id = stem
-                result.append({
-                    "id": synthetic_id,
-                    "status": "done",
-                    "topic": topic,
-                    "project_path": None,
-                    "slide_count": 0,
-                    "created_at": created_at,
-                    "updated_at": created_at,
-                    "download_url": f"/exports/{pptx.name}",
-                    "synthetic": True,
-                })
-                known_ids.add(synthetic_id)
 
         # Sort all results by created_at descending
         result.sort(key=lambda j: j.get("created_at") or "", reverse=True)

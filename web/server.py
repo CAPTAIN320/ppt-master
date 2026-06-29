@@ -9,7 +9,8 @@ Endpoints:
   WS   /ws/{job_id}               Real-time log + event stream
   POST /jobs/{job_id}/confirm     Submit Eight Confirmations result
   GET  /jobs/{job_id}/slides/{n}  Serve SVG thumbnail for slide N
-  GET  /jobs/{job_id}/download    Download the exported .pptx
+  GET  /jobs/{job_id}/download    Download the exported .pptx (pre-existing file)
+  POST /jobs/{job_id}/export      Generate PPTX on-demand from SVG files
   GET  /static/{path}             Serve static files
 """
 
@@ -394,18 +395,81 @@ async def download_pptx(job_id: str):
     )
 
 
-@app.get("/exports/{filename}")
-async def download_export_by_filename(filename: str):
-    """Serve a PPTX directly from the exports directory by filename.
+# ── On-demand PPTX export ─────────────────────────────────────────────────
 
-    Used by synthetic Library entries for orphan PPTX files whose download_url
-    is /exports/<filename> rather than /jobs/<id>/download.
+
+@app.post("/jobs/{job_id}/export")
+async def export_pptx(job_id: str):
+    """Generate a PPTX on-demand by running svg_to_pptx.py against the project's SVG files.
+
+    Looks up the project_path from the DB, or falls back to treating job_id as a
+    project directory name under /app/projects/ for orphan (synthetic) entries.
+    Runs svg_to_pptx.py synchronously and streams the resulting PPTX back as a
+    file download.
     """
-    pptx_path = EXPORTS_DIR / filename
-    if not pptx_path.exists() or pptx_path.suffix.lower() != ".pptx":
-        raise HTTPException(status_code=404, detail="File not found")
+    # 1. Resolve project_path
+    job = store.get_job(job_id)
+    if job is not None:
+        project_path_str = job.get("project_path")
+        if not project_path_str:
+            raise HTTPException(status_code=404, detail="Project path not set for this job")
+        proj_dir = Path(project_path_str)
+        # Remap Docker-internal /app/projects/... to the actual mount point when
+        # running outside Docker (e.g. tests on host).
+        if not proj_dir.exists() and proj_dir.parts[:3] == ('/', 'app', 'projects'):
+            proj_dir = REPO_ROOT / "projects" / proj_dir.name
+    else:
+        # Fallback: treat job_id as a project directory name
+        proj_dir = REPO_ROOT / "projects" / job_id
+        if not proj_dir.is_dir():
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    if not proj_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"Project directory not found: {proj_dir}")
+
+    # 2. Run svg_to_pptx.py as a subprocess
+    script_path = REPO_ROOT / "skills" / "ppt-master" / "scripts" / "svg_to_pptx.py"
+    proc = await asyncio.create_subprocess_exec(
+        "python3", str(script_path), str(proj_dir),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_bytes, stderr_bytes = await proc.communicate()
+
+    if proc.returncode != 0:
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+        raise HTTPException(
+            status_code=500,
+            detail=f"svg_to_pptx.py failed (exit {proc.returncode}):\n{stderr_text}",
+        )
+
+    # 3. Find the generated PPTX — svg_to_pptx.py writes to <project>/exports/
+    exports_subdir = proj_dir / "exports"
+    pptx_candidates: list[Path] = []
+    if exports_subdir.is_dir():
+        pptx_candidates = sorted(
+            exports_subdir.glob("*.pptx"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+
+    if not pptx_candidates:
+        # Fallback: check the global exports/ directory
+        pptx_candidates = sorted(
+            [p for p in EXPORTS_DIR.glob("*.pptx") if proj_dir.name in p.stem],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+
+    if not pptx_candidates:
+        raise HTTPException(status_code=500, detail="Export succeeded but no PPTX file was found")
+
+    pptx_path = pptx_candidates[0]
+
+    # 4. Return the PPTX as a download
     return FileResponse(
         str(pptx_path),
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers={"Content-Disposition": f'attachment; filename="{pptx_path.name}"'},
         filename=pptx_path.name,
     )

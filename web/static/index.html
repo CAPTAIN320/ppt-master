@@ -2013,11 +2013,69 @@ async function loadLibrary() {
       </div>
       <div class="library-card-actions">
         ${slideCount > 0 ? `<button class="btn btn-view-slides" onclick="loadJobSlides('${job.id}')">▶ View Slides</button>` : ''}
-        <a class="btn btn-lib-download" href="${escAttr(downloadUrl)}" download title="Download PPTX">⬇ PPTX</a>
+        <button class="btn btn-lib-download" id="dl-btn-${job.id}" onclick="downloadPresentation('${job.id}', '${escAttr(title)}')" title="Download PPTX">⬇ PPTX</button>
       </div>
     `;
     grid.appendChild(card);
   });
+}
+
+async function downloadPresentation(jobId, title) {
+  // Decode any HTML entities that escAttr() may have introduced (e.g. &quot; &#39;)
+  // so the fallback filename is clean.
+  if (title) {
+    const ta = document.createElement('textarea');
+    ta.innerHTML = title;
+    title = ta.value;
+  }
+
+  const btn = document.getElementById(`dl-btn-${jobId}`);
+  const originalHtml = btn ? btn.innerHTML : null;
+
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '⏳ Generating…';
+  }
+
+  try {
+    const resp = await fetch(`/jobs/${jobId}/export`, { method: 'POST' });
+    if (!resp.ok) {
+      let detail = `HTTP ${resp.status}`;
+      try {
+        const err = await resp.json();
+        detail = err.detail || detail;
+      } catch (_) {
+        detail = await resp.text().catch(() => detail);
+      }
+      throw new Error(detail);
+    }
+
+    // Derive filename from Content-Disposition header or fall back to title
+    let filename = (title || jobId).replace(/[^a-z0-9_\-. ]/gi, '_') + '.pptx';
+    const cd = resp.headers.get('Content-Disposition');
+    if (cd) {
+      const m = cd.match(/filename="?([^";\n]+)"?/i);
+      if (m) filename = m[1].trim();
+    }
+
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+
+  } catch (err) {
+    showToast(`Export failed: ${err.message}`);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = originalHtml || '⬇ PPTX';
+    }
+  }
 }
 
 async function loadJobSlides(jobId) {
