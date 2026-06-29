@@ -841,6 +841,146 @@
 
     #download-section .btn-download { width: auto; padding: 10px 20px; }
 
+    /* ── Library tab ──────────────────────────────────────────────────────── */
+    #panel-library {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      background: var(--bg);
+    }
+
+    .library-loading {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 60px 20px;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    .library-empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 60px 20px;
+      color: var(--text-dim);
+    }
+
+    .library-empty-icon { font-size: 48px; opacity: 0.35; }
+    .library-empty-text { font-size: 13px; }
+
+    .library-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 16px;
+    }
+
+    .library-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    .library-card:hover {
+      border-color: var(--accent);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .library-card-thumb {
+      width: 100%;
+      aspect-ratio: 16/9;
+      background: var(--bg-input);
+      border-bottom: 1px solid var(--border);
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+
+    .library-card-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .library-card-thumb-placeholder {
+      font-size: 36px;
+      opacity: 0.25;
+    }
+
+    .library-card-body {
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      flex: 1;
+    }
+
+    .library-card-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1.4;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+    }
+
+    .library-card-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .library-card-actions {
+      display: flex;
+      gap: 8px;
+      padding: 10px 14px;
+      border-top: 1px solid var(--border);
+      background: var(--bg-panel);
+    }
+
+    .library-card-actions .btn {
+      flex: 1;
+      font-size: 12px;
+      padding: 7px 10px;
+    }
+
+    .btn-view-slides {
+      background: var(--accent-dim);
+      color: var(--accent);
+      border: 1px solid rgba(91,141,239,0.3);
+    }
+    .btn-view-slides:hover:not(:disabled) {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn-lib-download {
+      background: transparent;
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+      text-decoration: none;
+    }
+    .btn-lib-download:hover:not(:disabled) {
+      background: var(--bg-card);
+      color: var(--text);
+    }
+
     /* ── Spinner ──────────────────────────────────────────────────────────── */
     .spinner {
       width: 16px;
@@ -1045,6 +1185,9 @@
         🖼 Slides
         <span class="tab-badge" id="slides-badge" style="display:none;">0</span>
       </button>
+      <button class="tab-btn" data-tab="library" onclick="switchTab('library')" id="tab-library">
+        📁 Library
+      </button>
     </div>
 
     <!-- Log tab -->
@@ -1121,6 +1264,21 @@
       </div>
     </div>
 
+    <!-- Library tab -->
+    <div class="tab-content" id="tab-library">
+      <div id="panel-library">
+        <div class="library-loading" id="library-loading" style="display:none;">
+          <div class="spinner" style="width:24px;height:24px;border-width:3px;color:var(--accent);"></div>
+          <span>Loading library…</span>
+        </div>
+        <div class="library-empty" id="library-empty" style="display:none;">
+          <div class="library-empty-icon">📁</div>
+          <div class="library-empty-text">No completed presentations yet.</div>
+        </div>
+        <div class="library-grid" id="library-grid"></div>
+      </div>
+    </div>
+
     <!-- Download bar -->
     <div id="download-section" class="hidden">
       <div class="download-inner">
@@ -1190,12 +1348,18 @@ const state = {
   selectedFiles: [],
 };
 
+// Flag: true after the first successful Library load; prevents redundant
+// fetches on every tab click.  Reset to false when a new job completes so
+// the next Library visit picks up the new entry.
+let libraryLoaded = false;
+
 // ── Tab management ─────────────────────────────────────────────────────────
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   document.getElementById(`tab-${name}`).classList.add('active');
+  if (name === 'library' && !libraryLoaded) loadLibrary();
 }
 
 // ── Status badge ───────────────────────────────────────────────────────────
@@ -1406,6 +1570,8 @@ function handleEvent(event) {
       }
       appendLog('\n✅ Pipeline complete!\n', 'log-success');
       resetGenerateBtn();
+      // Invalidate the Library cache so the next visit picks up this new entry.
+      libraryLoaded = false;
       break;
 
     case 'error':
@@ -1589,6 +1755,11 @@ async function submitConfirm() {
 
 // ── Slide gallery (PowerPoint-style) ───────────────────────────────────────
 function addSlideThumb(slideNum, url) {
+  // Guard against duplicates: if a strip item for this slide already exists,
+  // skip insertion entirely (prevents double-adds from repeated slide_ready
+  // events or multiple loadJobSlides() calls without a prior strip clear).
+  if (document.getElementById(`strip-item-${slideNum}`)) return;
+
   const empty = document.getElementById('slides-empty');
   if (empty) empty.style.display = 'none';
 
@@ -1703,6 +1874,8 @@ function resetMonitor() {
   document.getElementById('slide-strip').innerHTML = '';
   document.getElementById('slides-ppt-layout').classList.remove('has-slides');
   document.getElementById('slides-empty').style.display = 'flex';
+  // Invalidate Library cache so a fresh load happens on next tab visit.
+  libraryLoaded = false;
   // Reset viewer
   const viewerImg = document.getElementById('slide-viewer-img');
   viewerImg.src = '';
@@ -1778,6 +1951,133 @@ function initSidebar() {
     btn.textContent = '▶';
     btn.title = 'Expand sidebar';
   }
+}
+
+// ── Library ────────────────────────────────────────────────────────────────
+async function loadLibrary() {
+  const grid    = document.getElementById('library-grid');
+  const loading = document.getElementById('library-loading');
+  const empty   = document.getElementById('library-empty');
+
+  grid.innerHTML = '';
+  loading.style.display = 'flex';
+  empty.style.display   = 'none';
+
+  let jobs = [];
+  try {
+    const resp = await fetch('/jobs');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    jobs = await resp.json();
+  } catch (err) {
+    loading.style.display = 'none';
+    empty.style.display   = 'flex';
+    empty.querySelector('.library-empty-text').textContent = `Failed to load library: ${err.message}`;
+    return;
+  }
+
+  loading.style.display = 'none';
+
+  if (!jobs.length) {
+    empty.style.display = 'flex';
+    empty.querySelector('.library-empty-text').textContent = 'No completed presentations yet.';
+    return;
+  }
+
+  // Mark library as loaded so switchTab('library') won't re-fetch on every click.
+  libraryLoaded = true;
+
+  jobs.forEach(job => {
+    const title      = job.topic || job.id;
+    const slideCount = job.slide_count || 0;
+    const createdAt  = job.created_at ? new Date(job.created_at + 'Z').toLocaleString() : '—';
+    const thumbUrl   = slideCount > 0 ? `/jobs/${job.id}/slides/1` : null;
+    const downloadUrl = job.download_url || `/jobs/${job.id}/download`;
+
+    const card = document.createElement('div');
+    card.className = 'library-card';
+    card.innerHTML = `
+      <div class="library-card-thumb">
+        ${thumbUrl
+          ? `<img src="${thumbUrl}" alt="Slide 1 of ${escHtml(title)}"
+                  onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" loading="lazy" />
+             <div class="library-card-thumb-placeholder" style="display:none;">🖼</div>`
+          : `<div class="library-card-thumb-placeholder">🖼</div>`
+        }
+      </div>
+      <div class="library-card-body">
+        <div class="library-card-title" title="${escAttr(title)}">${escHtml(title)}</div>
+        <div class="library-card-meta">
+          <span>🗓 ${escHtml(createdAt)}</span>
+          ${slideCount ? `<span>· ${slideCount} slide${slideCount !== 1 ? 's' : ''}</span>` : ''}
+        </div>
+      </div>
+      <div class="library-card-actions">
+        ${slideCount > 0 ? `<button class="btn btn-view-slides" onclick="loadJobSlides('${job.id}')">▶ View Slides</button>` : ''}
+        <a class="btn btn-lib-download" href="${escAttr(downloadUrl)}" download title="Download PPTX">⬇ PPTX</a>
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+async function loadJobSlides(jobId) {
+  // Switch to Slides tab first so the user sees progress
+  switchTab('slides');
+
+  // Clear current slide strip and viewer
+  const strip = document.getElementById('slide-strip');
+  strip.innerHTML = '';
+  const layout = document.getElementById('slides-ppt-layout');
+  layout.classList.remove('has-slides');
+  const empty = document.getElementById('slides-empty');
+  if (empty) empty.style.display = 'flex';
+  const viewerImg = document.getElementById('slide-viewer-img');
+  viewerImg.src = '';
+  viewerImg.style.display = 'none';
+  const viewerEmpty = document.getElementById('slide-viewer-empty');
+  if (viewerEmpty) viewerEmpty.style.display = 'flex';
+  state.slideCount = 0;
+  document.getElementById('slides-badge').style.display = 'none';
+  document.getElementById('slides-badge').textContent = '0';
+
+  // Fetch job metadata to get slide_count
+  let slideCount = 0;
+  try {
+    const resp = await fetch(`/jobs/${jobId}`);
+    if (resp.ok) {
+      const job = await resp.json();
+      slideCount = job.slide_count || 0;
+    }
+  } catch (_) { /* fall through to probe */ }
+
+  // If slide_count is 0 or unknown, probe until 404
+  if (slideCount === 0) {
+    let n = 1;
+    while (true) {
+      const probe = await fetch(`/jobs/${jobId}/slides/${n}`, { method: 'HEAD' });
+      if (!probe.ok) break;
+      n++;
+      if (n > 200) break; // safety cap
+    }
+    slideCount = n - 1;
+  }
+
+  if (slideCount === 0) {
+    if (empty) empty.style.display = 'flex';
+    return;
+  }
+
+  // Load each slide into the strip
+  for (let i = 1; i <= slideCount; i++) {
+    const url = `/jobs/${jobId}/slides/${i}`;
+    addSlideThumb(i, url);
+    state.slideCount = i;
+    updateSlidesBadge();
+  }
+
+  // Show slides tab button and select slide 1
+  document.getElementById('slides-tab-btn').style.display = 'flex';
+  selectSlide(1);
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────
