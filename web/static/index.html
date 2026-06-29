@@ -96,6 +96,11 @@
       grid-template-columns: 360px 1fr;
       height: 100vh;
       overflow: hidden;
+      transition: grid-template-columns 0.25s ease;
+    }
+
+    #app.sidebar-collapsed {
+      grid-template-columns: 48px 1fr;
     }
 
     /* ── Header ───────────────────────────────────────────────────────────── */
@@ -152,10 +157,64 @@
       background: var(--bg-panel);
       border-right: 1px solid var(--border);
       overflow-y: auto;
+      overflow-x: hidden;
       padding: 20px;
       display: flex;
       flex-direction: column;
       gap: 20px;
+      position: relative;
+      transition: padding 0.25s ease;
+    }
+
+    #app.sidebar-collapsed #left-panel {
+      padding: 12px 0;
+      overflow-y: hidden;
+    }
+
+    /* Hide all left-panel content except the toggle when collapsed */
+    #app.sidebar-collapsed #left-panel > *:not(#sidebar-toggle) {
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.15s ease;
+    }
+
+    #left-panel > *:not(#sidebar-toggle) {
+      opacity: 1;
+      transition: opacity 0.2s ease 0.05s;
+    }
+
+    /* ── Sidebar toggle button ────────────────────────────────────────────── */
+    #sidebar-toggle {
+      position: absolute;
+      top: 12px;
+      right: 10px;
+      width: 28px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--text-muted);
+      transition: background 0.15s, border-color 0.15s, color 0.15s, right 0.25s ease;
+      z-index: 20;
+      flex-shrink: 0;
+      line-height: 1;
+      user-select: none;
+    }
+
+    #sidebar-toggle:hover {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    #app.sidebar-collapsed #sidebar-toggle {
+      right: 50%;
+      transform: translateX(50%);
     }
 
     /* ── Right panel ──────────────────────────────────────────────────────── */
@@ -557,11 +616,12 @@
 
     .confirm-actions .btn-confirm { flex: 1; }
 
-    /* ── Slide gallery ────────────────────────────────────────────────────── */
+    /* ── Slide PowerPoint-style layout ───────────────────────────────────── */
     #slides-tab-content {
       flex: 1;
-      overflow-y: auto;
-      padding: 20px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
     }
 
     .slides-empty {
@@ -569,49 +629,144 @@
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      height: 100%;
+      flex: 1;
       gap: 12px;
       color: var(--text-dim);
     }
 
     .slides-empty-icon { font-size: 40px; opacity: 0.4; }
 
-    #slide-gallery {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-      gap: 14px;
-    }
-
-    .slide-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
+    /* Two-panel layout: strip + viewer */
+    #slides-ppt-layout {
+      display: none;
+      flex: 1;
       overflow: hidden;
+    }
+
+    #slides-ppt-layout.has-slides {
+      display: flex;
+    }
+
+    /* Left strip */
+    #slide-strip {
+      width: 180px;
+      flex-shrink: 0;
+      background: var(--bg-panel);
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      overflow-x: hidden;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      padding: 8px 0;
+    }
+
+    .strip-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      padding: 8px 10px;
       cursor: pointer;
-      transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+      border-left: 3px solid transparent;
+      transition: background 0.12s, border-color 0.12s;
+      flex-shrink: 0;
     }
 
-    .slide-card:hover {
-      border-color: var(--accent);
-      transform: translateY(-2px);
-      box-shadow: var(--shadow);
+    .strip-item:hover {
+      background: var(--bg-card);
     }
 
-    .slide-thumb {
+    .strip-item.selected {
+      background: var(--accent-dim);
+      border-left-color: var(--accent);
+    }
+
+    .strip-thumb {
       width: 100%;
       aspect-ratio: 16/9;
       background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      overflow: hidden;
       display: flex;
       align-items: center;
       justify-content: center;
-      overflow: hidden;
     }
 
-    .slide-thumb img {
+    .strip-item.selected .strip-thumb {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent);
+    }
+
+    .strip-thumb img {
       width: 100%;
       height: 100%;
       object-fit: contain;
     }
+
+    .strip-thumb-loading {
+      color: var(--text-dim);
+      font-size: 10px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .strip-num {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    .strip-item.selected .strip-num {
+      color: var(--accent);
+    }
+
+    /* Right viewer */
+    #slide-viewer {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg);
+      overflow: hidden;
+      padding: 24px;
+    }
+
+    #slide-viewer-inner {
+      width: 100%;
+      max-height: 100%;
+      aspect-ratio: 16/9;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: var(--shadow);
+    }
+
+    #slide-viewer-img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+
+    #slide-viewer-empty {
+      color: var(--text-dim);
+      font-size: 13px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Keep old slide-card / slide-gallery styles for any legacy references */
+    #slide-gallery { display: none; }
 
     .slide-thumb-loading {
       color: var(--text-dim);
@@ -620,14 +775,6 @@
       flex-direction: column;
       align-items: center;
       gap: 8px;
-    }
-
-    .slide-label {
-      padding: 8px 12px;
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--text-muted);
-      border-top: 1px solid var(--border);
     }
 
     /* ── Slide lightbox ───────────────────────────────────────────────────── */
@@ -769,6 +916,9 @@
         grid-template-columns: 1fr;
         grid-template-rows: 56px auto 1fr;
       }
+      #app.sidebar-collapsed {
+        grid-template-columns: 1fr;
+      }
       #left-panel {
         border-right: none;
         border-bottom: 1px solid var(--border);
@@ -796,6 +946,9 @@
 
   <!-- ── Left panel ─────────────────────────────────────────────────────── -->
   <aside id="left-panel">
+
+    <!-- Sidebar toggle button -->
+    <button id="sidebar-toggle" title="Toggle sidebar" aria-label="Toggle sidebar" onclick="toggleSidebar()">◀</button>
 
     <div>
       <div class="section-title">New Presentation</div>
@@ -948,7 +1101,23 @@
             Slide thumbnails will appear here as they are generated.
           </div>
         </div>
-        <div id="slide-gallery"></div>
+        <!-- PowerPoint-style two-panel layout -->
+        <div id="slides-ppt-layout">
+          <!-- Left strip -->
+          <div id="slide-strip"></div>
+          <!-- Right viewer -->
+          <div id="slide-viewer">
+            <div id="slide-viewer-inner">
+              <div id="slide-viewer-empty">
+                <span style="font-size:32px;opacity:0.3;">🖼</span>
+                <span>Select a slide</span>
+              </div>
+              <img id="slide-viewer-img" src="" alt="Selected slide" style="display:none;" />
+            </div>
+          </div>
+        </div>
+        <!-- Legacy gallery (hidden, kept for compatibility) -->
+        <div id="slide-gallery" style="display:none;"></div>
       </div>
     </div>
 
@@ -1418,28 +1587,73 @@ async function submitConfirm() {
   }
 }
 
-// ── Slide gallery ──────────────────────────────────────────────────────────
+// ── Slide gallery (PowerPoint-style) ───────────────────────────────────────
 function addSlideThumb(slideNum, url) {
   const empty = document.getElementById('slides-empty');
   if (empty) empty.style.display = 'none';
 
-  const gallery = document.getElementById('slide-gallery');
+  // Show the two-panel layout
+  const layout = document.getElementById('slides-ppt-layout');
+  layout.classList.add('has-slides');
 
-  const card = document.createElement('div');
-  card.className = 'slide-card';
-  card.id = `slide-card-${slideNum}`;
-  card.onclick = () => openLightbox(url, slideNum);
+  const strip = document.getElementById('slide-strip');
 
-  card.innerHTML = `
-    <div class="slide-thumb">
+  const item = document.createElement('div');
+  item.className = 'strip-item';
+  item.id = `strip-item-${slideNum}`;
+  item.dataset.slideNum = slideNum;
+  item.dataset.url = url;
+  item.onclick = () => selectSlide(slideNum);
+
+  item.innerHTML = `
+    <div class="strip-thumb">
       <img src="${url}" alt="Slide ${slideNum}"
-           onerror="this.parentElement.innerHTML='<div class=\\'slide-thumb-loading\\'>⚠️<br>Load error</div>'"
+           onerror="this.parentElement.innerHTML='<div class=\\'strip-thumb-loading\\'>⚠️<br>Err</div>'"
            loading="lazy" />
     </div>
-    <div class="slide-label">Slide ${slideNum}</div>
+    <div class="strip-num">${slideNum}</div>
   `;
 
-  gallery.appendChild(card);
+  strip.appendChild(item);
+
+  // Auto-select the latest slide
+  selectSlide(slideNum);
+}
+
+function selectSlide(slideNum) {
+  // Update strip selection
+  document.querySelectorAll('.strip-item').forEach(el => el.classList.remove('selected'));
+  const item = document.getElementById(`strip-item-${slideNum}`);
+  if (item) {
+    item.classList.add('selected');
+    // Scroll into view in the strip
+    item.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+
+  // Update viewer
+  const url = item ? item.dataset.url : null;
+  const viewerImg = document.getElementById('slide-viewer-img');
+  const viewerEmpty = document.getElementById('slide-viewer-empty');
+
+  if (url) {
+    viewerImg.src = url;
+    viewerImg.alt = `Slide ${slideNum}`;
+    viewerImg.style.display = 'block';
+    if (viewerEmpty) viewerEmpty.style.display = 'none';
+  }
+}
+
+function renderSlides() {
+  // Re-render all slides in the strip (used if slides need to be rebuilt)
+  const strip = document.getElementById('slide-strip');
+  strip.innerHTML = '';
+  const layout = document.getElementById('slides-ppt-layout');
+  if (state.slideCount === 0) {
+    layout.classList.remove('has-slides');
+    return;
+  }
+  layout.classList.add('has-slides');
+  // Items are added incrementally via addSlideThumb; this is a no-op placeholder
 }
 
 function updateSlidesBadge() {
@@ -1486,8 +1700,15 @@ function resetMonitor() {
   document.getElementById('log-empty').style.display = 'flex';
 
   // Clear slides
-  document.getElementById('slide-gallery').innerHTML = '';
+  document.getElementById('slide-strip').innerHTML = '';
+  document.getElementById('slides-ppt-layout').classList.remove('has-slides');
   document.getElementById('slides-empty').style.display = 'flex';
+  // Reset viewer
+  const viewerImg = document.getElementById('slide-viewer-img');
+  viewerImg.src = '';
+  viewerImg.style.display = 'none';
+  const viewerEmpty = document.getElementById('slide-viewer-empty');
+  if (viewerEmpty) viewerEmpty.style.display = 'flex';
   state.slideCount = 0;
   document.getElementById('slides-badge').style.display = 'none';
   document.getElementById('slides-badge').textContent = '0';
@@ -1538,8 +1759,30 @@ function hideToast() {
   document.getElementById('error-toast').classList.remove('show');
 }
 
+// ── Sidebar toggle ─────────────────────────────────────────────────────────
+function toggleSidebar() {
+  const app = document.getElementById('app');
+  const btn = document.getElementById('sidebar-toggle');
+  const collapsed = app.classList.toggle('sidebar-collapsed');
+  btn.textContent = collapsed ? '▶' : '◀';
+  btn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+  localStorage.setItem('ppt-sidebar-collapsed', collapsed ? '1' : '0');
+}
+
+function initSidebar() {
+  const saved = localStorage.getItem('ppt-sidebar-collapsed');
+  if (saved === '1') {
+    const app = document.getElementById('app');
+    const btn = document.getElementById('sidebar-toggle');
+    app.classList.add('sidebar-collapsed');
+    btn.textContent = '▶';
+    btn.title = 'Expand sidebar';
+  }
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 initThemeToggle();
+initSidebar();
 setStatus('idle');
 </script>
 </body>
