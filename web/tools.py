@@ -242,14 +242,43 @@ async def dispatch_tool(
         return {"signalled": True, "slide": slide_num}
 
     elif name == "web_fetch":
-        import urllib.request
+        url = args["url"]
+        # Strategy 1: use the existing web_to_md.py script (handles curl_cffi, BS4, etc.)
+        web_to_md_script = REPO_ROOT / "skills" / "ppt-master" / "scripts" / "source_to_md" / "web_to_md.py"
+        if web_to_md_script.exists():
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "python3",
+                    str(web_to_md_script),
+                    url,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=str(REPO_ROOT),
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+                if proc.returncode == 0 and stdout:
+                    content = stdout.decode(errors="replace")
+                    return {"content": content[:60000], "url": url, "method": "web_to_md"}
+            except Exception:
+                pass  # fall through to requests
 
+        # Strategy 2: requests with browser User-Agent
         try:
-            with urllib.request.urlopen(args["url"], timeout=30) as resp:
+            import urllib.request
+
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " "AppleWebKit/537.36 (KHTML, like Gecko) " "Chrome/120.0.0.0 Safari/537.36"),
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.5",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 content = resp.read().decode(errors="replace")
-            return {"content": content[:50000], "url": args["url"]}  # cap at 50KB
+            return {"content": content[:60000], "url": url, "method": "urllib"}
         except Exception as exc:
-            return {"error": str(exc)}
+            return {"error": str(exc), "url": url}
 
     else:
         return {"error": f"Unknown tool: {name}"}
