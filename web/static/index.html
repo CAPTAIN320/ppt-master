@@ -34,6 +34,51 @@
       --shadow-sm:   0 2px 8px rgba(0,0,0,0.3);
     }
 
+    /* ── Light theme ──────────────────────────────────────────────────────── */
+    [data-theme="light"] {
+      --bg:          #f4f4f7;
+      --bg-panel:    #ffffff;
+      --bg-card:     #f0f0f5;
+      --bg-input:    #ffffff;
+      --border:      #d8d8e4;
+      --border-focus:#5b8def;
+      --accent:      #4a7de0;
+      --accent-hover:#3a6dd0;
+      --accent-dim:  rgba(74,125,224,0.12);
+      --text:        #1a1a2e;
+      --text-muted:  #5a5a78;
+      --text-dim:    #9a9ab0;
+      --success:     #2e9e68;
+      --warning:     #c8880a;
+      --error:       #d03030;
+      --confirm:     #7a4de0;
+      --confirm-dim: rgba(122,77,224,0.12);
+      --shadow:      0 4px 24px rgba(0,0,0,0.10);
+      --shadow-sm:   0 2px 8px rgba(0,0,0,0.08);
+    }
+
+    /* ── Theme toggle button ──────────────────────────────────────────────── */
+    #theme-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-card);
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 16px;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+      flex-shrink: 0;
+    }
+    #theme-toggle:hover {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
     html, body {
       height: 100%;
       background: var(--bg);
@@ -745,6 +790,7 @@
     </div>
     <div class="spacer"></div>
     <div id="header-status"></div>
+    <button id="theme-toggle" title="Toggle light/dark theme" aria-label="Toggle theme">🌙</button>
     <div class="version-badge">v1.0</div>
   </header>
 
@@ -932,6 +978,30 @@
 </div>
 
 <script>
+// ── Theme ──────────────────────────────────────────────────────────────────
+(function () {
+  const saved = localStorage.getItem('ppt-theme') || 'dark';
+  if (saved === 'light') document.documentElement.setAttribute('data-theme', 'light');
+})();
+
+function initThemeToggle() {
+  const btn = document.getElementById('theme-toggle');
+  if (!btn) return;
+  const isDark = () => document.documentElement.getAttribute('data-theme') !== 'light';
+  const update = () => { btn.textContent = isDark() ? '🌙' : '☀️'; };
+  update();
+  btn.addEventListener('click', () => {
+    const next = isDark() ? 'light' : 'dark';
+    if (next === 'light') {
+      document.documentElement.setAttribute('data-theme', 'light');
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+    }
+    localStorage.setItem('ppt-theme', next);
+    update();
+  });
+}
+
 // ── State ──────────────────────────────────────────────────────────────────
 const state = {
   jobId: null,
@@ -1458,6 +1528,7 @@ function hideToast() {
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────
+initThemeToggle();
 setStatus('idle');
 </script>
 </body>
