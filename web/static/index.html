@@ -2141,6 +2141,12 @@ async function deletePresentation(jobId) {
     // Invalidate library cache so next visit re-fetches
     libraryLoaded = false;
 
+    // If the deleted job is the currently active job, reset the monitor
+    if (state.jobId === jobId) {
+      localStorage.removeItem('pptmaster_active_job');
+      resetMonitor();
+    }
+
   } catch (err) {
     showToast(`Delete failed: ${err.message}`);
   }
