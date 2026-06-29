@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  ppt-master:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./projects:/app/projects
+      - ./exports:/app/exports
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - AGENT_MODEL=claude-sonnet-4.6
+      # AGENT_BASE_URL=http://host.docker.internal:4000/v1 is set in .env
+      # This reaches the LiteLLM proxy on the Mac host directly, bypassing nginx.
+      # Image generation uses LiteLLM proxy public URL (OPENAI_BASE_URL from .env)
+    extra_hosts:
+      # Ensures host.docker.internal resolves to the Mac host on all platforms
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

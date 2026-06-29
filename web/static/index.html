@@ -1,0 +1,1464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PPT Master — AI Presentation Generator</title>
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:          #0d0d0f;
+      --bg-panel:    #141418;
+      --bg-card:     #1a1a20;
+      --bg-input:    #1e1e26;
+      --border:      #2a2a35;
+      --border-focus:#5b8def;
+      --accent:      #5b8def;
+      --accent-hover:#7aa3f5;
+      --accent-dim:  rgba(91,141,239,0.15);
+      --text:        #e8e8f0;
+      --text-muted:  #7a7a90;
+      --text-dim:    #4a4a60;
+      --success:     #4caf82;
+      --warning:     #e8a838;
+      --error:       #e85555;
+      --confirm:     #9b6dff;
+      --confirm-dim: rgba(155,109,255,0.15);
+      --radius:      10px;
+      --radius-sm:   6px;
+      --font-mono:   'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      --font-ui:     -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      --shadow:      0 4px 24px rgba(0,0,0,0.4);
+      --shadow-sm:   0 2px 8px rgba(0,0,0,0.3);
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-ui);
+      font-size: 14px;
+      line-height: 1.6;
+      overflow: hidden;
+    }
+
+    /* ── Layout ───────────────────────────────────────────────────────────── */
+    #app {
+      display: grid;
+      grid-template-rows: 56px 1fr;
+      grid-template-columns: 360px 1fr;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Header ───────────────────────────────────────────────────────────── */
+    #header {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 20px;
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
+      z-index: 10;
+    }
+
+    #header .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: -0.3px;
+    }
+
+    #header .logo-icon {
+      width: 28px;
+      height: 28px;
+      background: linear-gradient(135deg, var(--accent), #9b6dff);
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+    }
+
+    #header .tagline {
+      color: var(--text-muted);
+      font-size: 12px;
+      margin-left: 4px;
+    }
+
+    #header .spacer { flex: 1; }
+
+    #header .version-badge {
+      font-size: 11px;
+      color: var(--text-dim);
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 2px 10px;
+    }
+
+    /* ── Left panel ───────────────────────────────────────────────────────── */
+    #left-panel {
+      background: var(--bg-panel);
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* ── Right panel ──────────────────────────────────────────────────────── */
+    #right-panel {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    /* ── Section headings ─────────────────────────────────────────────────── */
+    .section-title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+    }
+
+    /* ── Form elements ────────────────────────────────────────────────────── */
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    label {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-muted);
+    }
+
+    textarea, select, input[type="text"] {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      font-family: var(--font-ui);
+      font-size: 13px;
+      padding: 9px 12px;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      outline: none;
+      width: 100%;
+    }
+
+    textarea:focus, select:focus, input[type="text"]:focus {
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 3px var(--accent-dim);
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 90px;
+      line-height: 1.5;
+    }
+
+    select {
+      cursor: pointer;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%237a7a90' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      padding-right: 32px;
+    }
+
+    select option { background: var(--bg-card); }
+
+    /* ── File upload ──────────────────────────────────────────────────────── */
+    .file-drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      position: relative;
+    }
+
+    .file-drop-zone:hover,
+    .file-drop-zone.drag-over {
+      border-color: var(--accent);
+      background: var(--accent-dim);
+    }
+
+    .file-drop-zone input[type="file"] {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+      width: 100%;
+      height: 100%;
+    }
+
+    .file-drop-icon { font-size: 24px; margin-bottom: 6px; }
+
+    .file-drop-text {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .file-drop-text strong { color: var(--accent); }
+
+    .file-list {
+      margin-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .file-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 6px 10px;
+      font-size: 12px;
+    }
+
+    .file-item .file-icon { font-size: 14px; }
+    .file-item .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-item .file-size { color: var(--text-muted); font-size: 11px; }
+    .file-item .file-remove {
+      cursor: pointer;
+      color: var(--text-dim);
+      font-size: 16px;
+      line-height: 1;
+      padding: 0 2px;
+      transition: color 0.1s;
+    }
+    .file-item .file-remove:hover { color: var(--error); }
+
+    /* ── Buttons ──────────────────────────────────────────────────────────── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 18px;
+      border-radius: var(--radius-sm);
+      font-family: var(--font-ui);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: background 0.15s, transform 0.1s, opacity 0.15s;
+      text-decoration: none;
+    }
+
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+      width: 100%;
+    }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+
+    .btn-confirm {
+      background: var(--confirm);
+      color: #fff;
+    }
+    .btn-confirm:hover:not(:disabled) { background: #b08aff; }
+
+    .btn-download {
+      background: var(--success);
+      color: #fff;
+      width: 100%;
+      font-size: 14px;
+      padding: 12px 18px;
+    }
+    .btn-download:hover:not(:disabled) { background: #5dc494; }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover:not(:disabled) {
+      background: var(--bg-card);
+      color: var(--text);
+    }
+
+    /* ── Status badge ─────────────────────────────────────────────────────── */
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 20px;
+      letter-spacing: 0.3px;
+    }
+
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+    }
+
+    .status-idle     { background: var(--bg-card); color: var(--text-muted); border: 1px solid var(--border); }
+    .status-queued   { background: rgba(232,168,56,0.15); color: var(--warning); border: 1px solid rgba(232,168,56,0.3); }
+    .status-running  { background: rgba(91,141,239,0.15); color: var(--accent); border: 1px solid rgba(91,141,239,0.3); }
+    .status-confirm  { background: var(--confirm-dim); color: var(--confirm); border: 1px solid rgba(155,109,255,0.3); }
+    .status-done     { background: rgba(76,175,130,0.15); color: var(--success); border: 1px solid rgba(76,175,130,0.3); }
+    .status-error    { background: rgba(232,85,85,0.15); color: var(--error); border: 1px solid rgba(232,85,85,0.3); }
+
+    .status-dot-idle    { background: var(--text-dim); }
+    .status-dot-queued  { background: var(--warning); animation: pulse 1.5s infinite; }
+    .status-dot-running { background: var(--accent); animation: pulse 1s infinite; }
+    .status-dot-confirm { background: var(--confirm); animation: pulse 1.2s infinite; }
+    .status-dot-done    { background: var(--success); }
+    .status-dot-error   { background: var(--error); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    /* ── Right panel tabs ─────────────────────────────────────────────────── */
+    #right-tabs {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      padding: 0 16px;
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
+      height: 44px;
+      flex-shrink: 0;
+    }
+
+    .tab-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-muted);
+      cursor: pointer;
+      border: none;
+      background: transparent;
+      transition: color 0.15s, background 0.15s;
+      position: relative;
+    }
+
+    .tab-btn:hover { color: var(--text); background: var(--bg-card); }
+
+    .tab-btn.active {
+      color: var(--accent);
+      background: var(--accent-dim);
+    }
+
+    .tab-badge {
+      background: var(--accent);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 10px;
+      min-width: 16px;
+      text-align: center;
+    }
+
+    .tab-badge.confirm-badge { background: var(--confirm); }
+
+    /* ── Tab content ──────────────────────────────────────────────────────── */
+    .tab-content {
+      display: none;
+      flex: 1;
+      overflow: hidden;
+    }
+    .tab-content.active { display: flex; flex-direction: column; }
+
+    /* ── Log area ─────────────────────────────────────────────────────────── */
+    #log-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 20px;
+      background: var(--bg);
+    }
+
+    #log-output {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: #c8c8d8;
+    }
+
+    #log-output .log-agent   { color: var(--accent); }
+    #log-output .log-tool    { color: #e8c56a; }
+    #log-output .log-result  { color: var(--text-muted); }
+    #log-output .log-error   { color: var(--error); }
+    #log-output .log-success { color: var(--success); }
+    #log-output .log-cmd     { color: #a8d8a8; }
+
+    .log-empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      gap: 12px;
+      color: var(--text-dim);
+    }
+
+    .log-empty-icon { font-size: 40px; opacity: 0.4; }
+    .log-empty-text { font-size: 13px; }
+
+    /* ── Confirm panel ────────────────────────────────────────────────────── */
+    #confirm-tab-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+    }
+
+    .confirm-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      margin-bottom: 20px;
+      padding: 16px;
+      background: var(--confirm-dim);
+      border: 1px solid rgba(155,109,255,0.3);
+      border-radius: var(--radius);
+    }
+
+    .confirm-header-icon { font-size: 28px; flex-shrink: 0; }
+
+    .confirm-header-text h3 {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--confirm);
+      margin-bottom: 4px;
+    }
+
+    .confirm-header-text p {
+      font-size: 12px;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    .confirm-fields {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+
+    .confirm-field {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .confirm-field-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      background: var(--bg-input);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .confirm-field-key {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      color: var(--confirm);
+    }
+
+    .confirm-field-body { padding: 12px 14px; }
+
+    .confirm-field textarea {
+      min-height: 60px;
+      font-size: 12px;
+      background: var(--bg-input);
+    }
+
+    .confirm-field input[type="text"] {
+      font-size: 12px;
+      background: var(--bg-input);
+    }
+
+    .confirm-actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .confirm-actions .btn-confirm { flex: 1; }
+
+    /* ── Slide gallery ────────────────────────────────────────────────────── */
+    #slides-tab-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+    }
+
+    .slides-empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      gap: 12px;
+      color: var(--text-dim);
+    }
+
+    .slides-empty-icon { font-size: 40px; opacity: 0.4; }
+
+    #slide-gallery {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 14px;
+    }
+
+    .slide-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      cursor: pointer;
+      transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+    }
+
+    .slide-card:hover {
+      border-color: var(--accent);
+      transform: translateY(-2px);
+      box-shadow: var(--shadow);
+    }
+
+    .slide-thumb {
+      width: 100%;
+      aspect-ratio: 16/9;
+      background: var(--bg-input);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    .slide-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
+    .slide-thumb-loading {
+      color: var(--text-dim);
+      font-size: 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .slide-label {
+      padding: 8px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border);
+    }
+
+    /* ── Slide lightbox ───────────────────────────────────────────────────── */
+    #lightbox {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.85);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 40px;
+    }
+
+    #lightbox.open { display: flex; }
+
+    #lightbox-img {
+      max-width: 90vw;
+      max-height: 85vh;
+      border-radius: var(--radius);
+      box-shadow: 0 20px 80px rgba(0,0,0,0.8);
+    }
+
+    #lightbox-close {
+      position: absolute;
+      top: 20px;
+      right: 24px;
+      font-size: 28px;
+      color: var(--text-muted);
+      cursor: pointer;
+      line-height: 1;
+      transition: color 0.15s;
+    }
+
+    #lightbox-close:hover { color: var(--text); }
+
+    /* ── Download section ─────────────────────────────────────────────────── */
+    #download-section {
+      padding: 16px 20px;
+      background: var(--bg-panel);
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    #download-section.hidden { display: none; }
+
+    .download-inner {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .download-info { flex: 1; }
+    .download-info .download-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--success);
+      margin-bottom: 2px;
+    }
+    .download-info .download-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    #download-section .btn-download { width: auto; padding: 10px 20px; }
+
+    /* ── Spinner ──────────────────────────────────────────────────────────── */
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255,255,255,0.2);
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Scrollbar ────────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+    /* ── Divider ──────────────────────────────────────────────────────────── */
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 4px 0;
+    }
+
+    /* ── Info box ─────────────────────────────────────────────────────────── */
+    .info-box {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      font-size: 11px;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+
+    .info-box strong { color: var(--text); }
+
+    /* ── Error toast ──────────────────────────────────────────────────────── */
+    #error-toast {
+      display: none;
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: var(--bg-card);
+      border: 1px solid var(--error);
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      max-width: 380px;
+      box-shadow: var(--shadow);
+      z-index: 500;
+      animation: slideUp 0.2s ease;
+    }
+
+    #error-toast.show { display: flex; align-items: flex-start; gap: 10px; }
+
+    .toast-icon { font-size: 18px; flex-shrink: 0; }
+    .toast-body { flex: 1; }
+    .toast-title { font-size: 13px; font-weight: 600; color: var(--error); margin-bottom: 3px; }
+    .toast-msg { font-size: 12px; color: var(--text-muted); }
+    .toast-close { cursor: pointer; color: var(--text-dim); font-size: 18px; line-height: 1; }
+    .toast-close:hover { color: var(--text); }
+
+    @keyframes slideUp {
+      from { transform: translateY(10px); opacity: 0; }
+      to   { transform: translateY(0);    opacity: 1; }
+    }
+
+    /* ── Responsive ───────────────────────────────────────────────────────── */
+    @media (max-width: 768px) {
+      #app {
+        grid-template-columns: 1fr;
+        grid-template-rows: 56px auto 1fr;
+      }
+      #left-panel {
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        overflow-y: visible;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ── Header ─────────────────────────────────────────────────────────── -->
+  <header id="header">
+    <div class="logo">
+      <div class="logo-icon">🎯</div>
+      <span>PPT Master</span>
+      <span class="tagline">AI Presentation Generator</span>
+    </div>
+    <div class="spacer"></div>
+    <div id="header-status"></div>
+    <div class="version-badge">v1.0</div>
+  </header>
+
+  <!-- ── Left panel ─────────────────────────────────────────────────────── -->
+  <aside id="left-panel">
+
+    <div>
+      <div class="section-title">New Presentation</div>
+
+      <div class="form-group">
+        <label for="topic-input">Topic / Description</label>
+        <textarea
+          id="topic-input"
+          placeholder="e.g. The Future of AI in Healthcare&#10;&#10;Describe your presentation topic, key points, or paste a brief outline."
+          rows="5"
+        ></textarea>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">Source Files (optional)</div>
+      <div class="file-drop-zone" id="drop-zone">
+        <input type="file" id="file-input" multiple
+          accept=".pdf,.docx,.doc,.md,.txt,.pptx,.xlsx,.xlsm,.csv" />
+        <div class="file-drop-icon">📎</div>
+        <div class="file-drop-text">
+          <strong>Click to upload</strong> or drag & drop<br>
+          PDF, DOCX, MD, TXT, PPTX, XLSX
+        </div>
+      </div>
+      <div class="file-list" id="file-list"></div>
+    </div>
+
+    <div>
+      <div class="section-title">Settings</div>
+      <div style="display:flex; flex-direction:column; gap:10px;">
+
+        <div class="form-group">
+          <label for="canvas-select">Canvas Format</label>
+          <select id="canvas-select">
+            <option value="ppt169" selected>16:9 — Widescreen (default)</option>
+            <option value="ppt43">4:3 — Standard</option>
+            <option value="ppt1610">16:10 — Widescreen Alt</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="model-select">AI Model</label>
+          <select id="model-select">
+            <option value="claude-sonnet-4.6" selected>claude-sonnet-4.6 (recommended)</option>
+            <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
+            <option value="gpt-5.4">gpt-5.4</option>
+          </select>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div>
+      <button class="btn btn-primary" id="generate-btn" onclick="startJob()">
+        <span id="generate-btn-icon">✨</span>
+        <span id="generate-btn-text">Generate Presentation</span>
+      </button>
+    </div>
+
+    <div class="info-box">
+      <strong>How it works:</strong> The AI agent reads your topic and source files,
+      runs the full PPT Master pipeline (Strategist → SVG generation → PPTX export),
+      and streams live progress. You'll confirm design choices at Step 4.
+    </div>
+
+    <!-- Current job info -->
+    <div id="job-info" style="display:none;">
+      <div class="divider"></div>
+      <div class="section-title">Current Job</div>
+      <div class="info-box" style="font-family: var(--font-mono); font-size:11px;">
+        <div>ID: <span id="job-id-display" style="color:var(--accent)">—</span></div>
+        <div style="margin-top:4px;">Status: <span id="job-status-display">—</span></div>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- ── Right panel ─────────────────────────────────────────────────────── -->
+  <main id="right-panel">
+
+    <!-- Tabs -->
+    <div id="right-tabs">
+      <button class="tab-btn active" data-tab="log" onclick="switchTab('log')">
+        📋 Log
+      </button>
+      <button class="tab-btn" data-tab="confirm" onclick="switchTab('confirm')" id="confirm-tab-btn" style="display:none;">
+        🔐 Confirm
+        <span class="tab-badge confirm-badge" id="confirm-badge">!</span>
+      </button>
+      <button class="tab-btn" data-tab="slides" onclick="switchTab('slides')" id="slides-tab-btn">
+        🖼 Slides
+        <span class="tab-badge" id="slides-badge" style="display:none;">0</span>
+      </button>
+    </div>
+
+    <!-- Log tab -->
+    <div class="tab-content active" id="tab-log">
+      <div id="log-container">
+        <div class="log-empty" id="log-empty">
+          <div class="log-empty-icon">🤖</div>
+          <div class="log-empty-text">Agent output will appear here once you start a job.</div>
+        </div>
+        <div id="log-output"></div>
+      </div>
+    </div>
+
+    <!-- Confirm tab -->
+    <div class="tab-content" id="tab-confirm">
+      <div id="confirm-tab-content">
+        <div class="confirm-header">
+          <div class="confirm-header-icon">🔐</div>
+          <div class="confirm-header-text">
+            <h3>Eight Confirmations — Step 4</h3>
+            <p>
+              The Strategist has prepared design recommendations. Review and adjust
+              each field below, then click <strong>Confirm &amp; Continue</strong>
+              to proceed with SVG generation.
+            </p>
+          </div>
+        </div>
+        <div class="confirm-fields" id="confirm-fields"></div>
+        <div class="confirm-actions">
+          <button class="btn btn-confirm" id="confirm-submit-btn" onclick="submitConfirm()">
+            ✅ Confirm &amp; Continue
+          </button>
+          <button class="btn btn-ghost" onclick="resetConfirmFields()">
+            ↺ Reset
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Slides tab -->
+    <div class="tab-content" id="tab-slides">
+      <div id="slides-tab-content">
+        <div class="slides-empty" id="slides-empty">
+          <div class="slides-empty-icon">🖼</div>
+          <div style="font-size:13px; color:var(--text-dim);">
+            Slide thumbnails will appear here as they are generated.
+          </div>
+        </div>
+        <div id="slide-gallery"></div>
+      </div>
+    </div>
+
+    <!-- Download bar -->
+    <div id="download-section" class="hidden">
+      <div class="download-inner">
+        <div class="download-info">
+          <div class="download-title">✅ Presentation Ready!</div>
+          <div class="download-sub" id="download-filename">Your PPTX has been exported.</div>
+        </div>
+        <a class="btn btn-download" id="download-btn" href="#" download>
+          ⬇ Download PPTX
+        </a>
+      </div>
+    </div>
+
+  </main>
+
+</div>
+
+<!-- Lightbox -->
+<div id="lightbox" onclick="closeLightbox(event)">
+  <span id="lightbox-close" onclick="closeLightbox()">✕</span>
+  <img id="lightbox-img" src="" alt="Slide preview" />
+</div>
+
+<!-- Error toast -->
+<div id="error-toast">
+  <div class="toast-icon">⚠️</div>
+  <div class="toast-body">
+    <div class="toast-title">Error</div>
+    <div class="toast-msg" id="toast-msg"></div>
+  </div>
+  <div class="toast-close" onclick="hideToast()">✕</div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+const state = {
+  jobId: null,
+  status: 'idle',
+  ws: null,
+  slideCount: 0,
+  confirmData: null,
+  downloadUrl: null,
+  selectedFiles: [],
+};
+
+// ── Tab management ─────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.querySelector(`[data-tab="${name}"]`).classList.add('active');
+  document.getElementById(`tab-${name}`).classList.add('active');
+}
+
+// ── Status badge ───────────────────────────────────────────────────────────
+const STATUS_LABELS = {
+  idle:            ['idle',    'Idle'],
+  queued:          ['queued',  'Queued'],
+  running:         ['running', 'Running'],
+  confirm_pending: ['confirm', 'Awaiting Confirmation'],
+  done:            ['done',    'Done'],
+  error:           ['error',   'Error'],
+};
+
+function setStatus(status) {
+  state.status = status;
+  const [cls, label] = STATUS_LABELS[status] || ['idle', status];
+
+  const badge = `
+    <div class="status-badge status-${cls}">
+      <div class="status-dot status-dot-${cls}"></div>
+      ${label}
+    </div>`;
+
+  document.getElementById('header-status').innerHTML = badge;
+
+  const display = document.getElementById('job-status-display');
+  if (display) display.innerHTML = badge;
+}
+
+// ── File handling ──────────────────────────────────────────────────────────
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  addFiles(Array.from(e.dataTransfer.files));
+});
+
+fileInput.addEventListener('change', () => {
+  addFiles(Array.from(fileInput.files));
+  fileInput.value = '';
+});
+
+function addFiles(files) {
+  files.forEach(f => {
+    if (!state.selectedFiles.find(x => x.name === f.name && x.size === f.size)) {
+      state.selectedFiles.push(f);
+    }
+  });
+  renderFileList();
+}
+
+function removeFile(idx) {
+  state.selectedFiles.splice(idx, 1);
+  renderFileList();
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function fileIcon(name) {
+  const ext = name.split('.').pop().toLowerCase();
+  const icons = { pdf: '📄', docx: '📝', doc: '📝', md: '📋', txt: '📋',
+                  pptx: '📊', xlsx: '📊', xlsm: '📊', csv: '📊' };
+  return icons[ext] || '📎';
+}
+
+function renderFileList() {
+  const list = document.getElementById('file-list');
+  list.innerHTML = state.selectedFiles.map((f, i) => `
+    <div class="file-item">
+      <span class="file-icon">${fileIcon(f.name)}</span>
+      <span class="file-name" title="${f.name}">${f.name}</span>
+      <span class="file-size">${formatBytes(f.size)}</span>
+      <span class="file-remove" onclick="removeFile(${i})">×</span>
+    </div>
+  `).join('');
+}
+
+// ── Job creation ───────────────────────────────────────────────────────────
+async function startJob() {
+  const topic = document.getElementById('topic-input').value.trim();
+  if (!topic) {
+    showToast('Please enter a topic or description for your presentation.');
+    return;
+  }
+
+  const btn = document.getElementById('generate-btn');
+  const btnIcon = document.getElementById('generate-btn-icon');
+  const btnText = document.getElementById('generate-btn-text');
+
+  btn.disabled = true;
+  btnIcon.innerHTML = '<div class="spinner"></div>';
+  btnText.textContent = 'Starting…';
+
+  // Reset UI
+  resetMonitor();
+
+  const formData = new FormData();
+  formData.append('topic', topic);
+  formData.append('canvas_format', document.getElementById('canvas-select').value);
+  formData.append('model', document.getElementById('model-select').value);
+  state.selectedFiles.forEach(f => formData.append('files', f));
+
+  try {
+    const resp = await fetch('/jobs', { method: 'POST', body: formData });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new Error(err.detail || 'Failed to create job');
+    }
+    const data = await resp.json();
+    state.jobId = data.job_id;
+
+    // Show job info
+    document.getElementById('job-info').style.display = 'block';
+    document.getElementById('job-id-display').textContent = state.jobId;
+    setStatus('queued');
+
+    btnIcon.textContent = '⏳';
+    btnText.textContent = 'Running…';
+
+    // Connect WebSocket
+    connectWebSocket(state.jobId);
+
+  } catch (err) {
+    showToast(err.message);
+    btn.disabled = false;
+    btnIcon.textContent = '✨';
+    btnText.textContent = 'Generate Presentation';
+    setStatus('error');
+  }
+}
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+function connectWebSocket(jobId) {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws/${jobId}`);
+  state.ws = ws;
+
+  ws.onopen = () => {
+    setStatus('running');
+    appendLog('[WebSocket connected]\n', 'log-agent');
+  };
+
+  ws.onmessage = (evt) => {
+    let event;
+    try { event = JSON.parse(evt.data); }
+    catch { appendLog(evt.data); return; }
+    handleEvent(event);
+  };
+
+  ws.onerror = () => {
+    appendLog('[WebSocket error — attempting reconnect…]\n', 'log-error');
+  };
+
+  ws.onclose = () => {
+    appendLog('[WebSocket closed]\n', 'log-agent');
+    // If job is still running, try to reconnect after 2s
+    if (state.status === 'running' || state.status === 'queued') {
+      setTimeout(() => {
+        if (state.jobId && (state.status === 'running' || state.status === 'queued')) {
+          appendLog('[Reconnecting…]\n', 'log-agent');
+          connectWebSocket(state.jobId);
+        }
+      }, 2000);
+    }
+  };
+}
+
+// ── Event handler ──────────────────────────────────────────────────────────
+function handleEvent(event) {
+  switch (event.type) {
+
+    case 'log':
+      appendLog(event.text);
+      break;
+
+    case 'confirm_required':
+      state.confirmData = event.data;
+      setStatus('confirm_pending');
+      renderConfirmPanel(event.data);
+      // Show confirm tab and switch to it
+      const confirmTabBtn = document.getElementById('confirm-tab-btn');
+      confirmTabBtn.style.display = 'flex';
+      switchTab('confirm');
+      appendLog('\n[⚡ Eight Confirmations required — see Confirm tab]\n', 'log-agent');
+      break;
+
+    case 'slide_ready':
+      state.slideCount++;
+      addSlideThumb(event.slide, event.url);
+      updateSlidesBadge();
+      // Show slides tab button
+      document.getElementById('slides-tab-btn').style.display = 'flex';
+      appendLog(`[Slide ${event.slide} ready]\n`, 'log-success');
+      break;
+
+    case 'job_done':
+      setStatus('done');
+      state.downloadUrl = event.download_url;
+      if (event.download_url) {
+        showDownloadBar(event.download_url, event.filename || 'presentation.pptx');
+      }
+      appendLog('\n✅ Pipeline complete!\n', 'log-success');
+      resetGenerateBtn();
+      break;
+
+    case 'error':
+      setStatus('error');
+      appendLog(`\n❌ Error: ${event.message}\n`, 'log-error');
+      showToast(event.message);
+      resetGenerateBtn();
+      break;
+
+    default:
+      appendLog(`[Event: ${JSON.stringify(event)}]\n`, 'log-result');
+  }
+}
+
+// ── Log rendering ──────────────────────────────────────────────────────────
+function appendLog(text, cssClass) {
+  const empty = document.getElementById('log-empty');
+  if (empty) empty.style.display = 'none';
+
+  const output = document.getElementById('log-output');
+
+  // Colorize known patterns if no explicit class
+  if (!cssClass) {
+    cssClass = detectLogClass(text);
+  }
+
+  const span = document.createElement('span');
+  if (cssClass) span.className = cssClass;
+  span.textContent = text;
+  output.appendChild(span);
+
+  // Auto-scroll
+  const container = document.getElementById('log-container');
+  container.scrollTop = container.scrollHeight;
+}
+
+function detectLogClass(text) {
+  if (text.startsWith('[Agent]')) return 'log-agent';
+  if (text.startsWith('[Tool]')) return 'log-tool';
+  if (text.startsWith('[Tool result]')) return 'log-result';
+  if (text.startsWith('$ ')) return 'log-cmd';
+  if (text.includes('Error') || text.includes('error') || text.includes('❌')) return 'log-error';
+  if (text.includes('✅') || text.includes('complete') || text.includes('ready')) return 'log-success';
+  return null;
+}
+
+// ── Confirm panel ──────────────────────────────────────────────────────────
+let _originalConfirmData = null;
+
+function renderConfirmPanel(data) {
+  _originalConfirmData = JSON.parse(JSON.stringify(data));
+  const container = document.getElementById('confirm-fields');
+  container.innerHTML = '';
+
+  function renderValue(key, value, path) {
+    if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      // Nested object — render sub-fields
+      const wrapper = document.createElement('div');
+      wrapper.className = 'confirm-field';
+      wrapper.innerHTML = `
+        <div class="confirm-field-header">
+          <span class="confirm-field-key">${formatKey(key)}</span>
+        </div>
+        <div class="confirm-field-body" id="nested-${path.join('-')}"></div>
+      `;
+      container.appendChild(wrapper);
+      const body = wrapper.querySelector('.confirm-field-body');
+      Object.entries(value).forEach(([k, v]) => {
+        body.appendChild(buildField(k, v, [...path, k]));
+      });
+    } else {
+      container.appendChild(buildField(key, value, path));
+    }
+  }
+
+  if (typeof data === 'object' && data !== null) {
+    Object.entries(data).forEach(([k, v]) => renderValue(k, v, [k]));
+  } else {
+    // Scalar — single textarea
+    container.appendChild(buildField('value', data, ['value']));
+  }
+}
+
+function buildField(key, value, path) {
+  const div = document.createElement('div');
+  div.className = 'confirm-field';
+
+  const isLong = typeof value === 'string' && value.length > 80;
+  const isArray = Array.isArray(value);
+  const displayValue = isArray ? value.join('\n') : (typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value ?? ''));
+
+  div.innerHTML = `
+    <div class="confirm-field-header">
+      <span class="confirm-field-key">${formatKey(key)}</span>
+    </div>
+    <div class="confirm-field-body">
+      ${(isLong || isArray || typeof value === 'object')
+        ? `<textarea data-path="${path.join('.')}" rows="${Math.min(8, displayValue.split('\n').length + 1)}">${escHtml(displayValue)}</textarea>`
+        : `<input type="text" data-path="${path.join('.')}" value="${escAttr(displayValue)}" />`
+      }
+    </div>
+  `;
+  return div;
+}
+
+function formatKey(key) {
+  return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function escAttr(s) {
+  return String(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+function resetConfirmFields() {
+  if (_originalConfirmData) renderConfirmPanel(_originalConfirmData);
+}
+
+function collectConfirmData() {
+  const result = JSON.parse(JSON.stringify(state.confirmData || {}));
+  const inputs = document.querySelectorAll('#confirm-fields [data-path]');
+  inputs.forEach(input => {
+    const path = input.dataset.path.split('.');
+    const value = input.value;
+    // Set nested path
+    let obj = result;
+    for (let i = 0; i < path.length - 1; i++) {
+      if (obj[path[i]] === undefined) obj[path[i]] = {};
+      obj = obj[path[i]];
+    }
+    const lastKey = path[path.length - 1];
+    // Try to parse as JSON for objects/arrays
+    if (typeof (state.confirmData || {})[lastKey] === 'object') {
+      try { obj[lastKey] = JSON.parse(value); } catch { obj[lastKey] = value; }
+    } else {
+      obj[lastKey] = value;
+    }
+  });
+  return result;
+}
+
+async function submitConfirm() {
+  if (!state.jobId) return;
+
+  const btn = document.getElementById('confirm-submit-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div> Submitting…';
+
+  const choices = collectConfirmData();
+
+  try {
+    const resp = await fetch(`/jobs/${state.jobId}/confirm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(choices),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new Error(err.detail || 'Confirm failed');
+    }
+
+    setStatus('running');
+    // Hide confirm tab, switch to log
+    document.getElementById('confirm-tab-btn').style.display = 'none';
+    switchTab('log');
+    appendLog('\n[✅ Confirmation submitted — resuming pipeline…]\n', 'log-success');
+
+  } catch (err) {
+    showToast(err.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '✅ Confirm &amp; Continue';
+  }
+}
+
+// ── Slide gallery ──────────────────────────────────────────────────────────
+function addSlideThumb(slideNum, url) {
+  const empty = document.getElementById('slides-empty');
+  if (empty) empty.style.display = 'none';
+
+  const gallery = document.getElementById('slide-gallery');
+
+  const card = document.createElement('div');
+  card.className = 'slide-card';
+  card.id = `slide-card-${slideNum}`;
+  card.onclick = () => openLightbox(url, slideNum);
+
+  card.innerHTML = `
+    <div class="slide-thumb">
+      <img src="${url}" alt="Slide ${slideNum}"
+           onerror="this.parentElement.innerHTML='<div class=\\'slide-thumb-loading\\'>⚠️<br>Load error</div>'"
+           loading="lazy" />
+    </div>
+    <div class="slide-label">Slide ${slideNum}</div>
+  `;
+
+  gallery.appendChild(card);
+}
+
+function updateSlidesBadge() {
+  const badge = document.getElementById('slides-badge');
+  badge.textContent = state.slideCount;
+  badge.style.display = 'inline-block';
+}
+
+// ── Lightbox ───────────────────────────────────────────────────────────────
+function openLightbox(url, slideNum) {
+  const lb = document.getElementById('lightbox');
+  const img = document.getElementById('lightbox-img');
+  img.src = url;
+  img.alt = `Slide ${slideNum}`;
+  lb.classList.add('open');
+}
+
+function closeLightbox(evt) {
+  if (!evt || evt.target === document.getElementById('lightbox') || evt.target === document.getElementById('lightbox-close')) {
+    document.getElementById('lightbox').classList.remove('open');
+  }
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeLightbox({ target: document.getElementById('lightbox') });
+});
+
+// ── Download bar ───────────────────────────────────────────────────────────
+function showDownloadBar(url, filename) {
+  const section = document.getElementById('download-section');
+  const btn = document.getElementById('download-btn');
+  const sub = document.getElementById('download-filename');
+
+  btn.href = url;
+  btn.download = filename;
+  sub.textContent = filename;
+  section.classList.remove('hidden');
+}
+
+// ── Reset helpers ──────────────────────────────────────────────────────────
+function resetMonitor() {
+  // Clear log
+  document.getElementById('log-output').innerHTML = '';
+  document.getElementById('log-empty').style.display = 'flex';
+
+  // Clear slides
+  document.getElementById('slide-gallery').innerHTML = '';
+  document.getElementById('slides-empty').style.display = 'flex';
+  state.slideCount = 0;
+  document.getElementById('slides-badge').style.display = 'none';
+  document.getElementById('slides-badge').textContent = '0';
+
+  // Hide confirm tab
+  document.getElementById('confirm-tab-btn').style.display = 'none';
+  document.getElementById('confirm-fields').innerHTML = '';
+
+  // Hide download
+  document.getElementById('download-section').classList.add('hidden');
+
+  // Switch to log tab
+  switchTab('log');
+
+  // Close existing WS
+  if (state.ws) {
+    state.ws.onclose = null;
+    state.ws.close();
+    state.ws = null;
+  }
+
+  state.slideCount = 0;
+  state.confirmData = null;
+  state.downloadUrl = null;
+}
+
+function resetGenerateBtn() {
+  const btn = document.getElementById('generate-btn');
+  const btnIcon = document.getElementById('generate-btn-icon');
+  const btnText = document.getElementById('generate-btn-text');
+  btn.disabled = false;
+  btnIcon.textContent = '✨';
+  btnText.textContent = 'Generate Presentation';
+}
+
+// ── Toast ──────────────────────────────────────────────────────────────────
+let _toastTimer = null;
+
+function showToast(msg) {
+  document.getElementById('toast-msg').textContent = msg;
+  const toast = document.getElementById('error-toast');
+  toast.classList.add('show');
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(hideToast, 6000);
+}
+
+function hideToast() {
+  document.getElementById('error-toast').classList.remove('show');
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+setStatus('idle');
+</script>
+</body>
+</html>
