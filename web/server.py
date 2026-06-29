@@ -120,6 +120,11 @@ async def delete_job(job_id: str):
     """Delete a job: remove project directory from disk (if present) and DB row."""
     job = store.get_job(job_id)
     if job is None:
+        # Try treating job_id as a project directory name (synthetic orphan entry)
+        orphan_dir = REPO_ROOT / "projects" / job_id
+        if orphan_dir.is_dir():
+            shutil.rmtree(orphan_dir, ignore_errors=True)
+            return JSONResponse({"ok": True})
         raise HTTPException(status_code=404, detail="Job not found")
 
     # Remove project directory if it exists
