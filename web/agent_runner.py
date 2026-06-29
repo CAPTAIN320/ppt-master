@@ -1,9 +1,7 @@
 """
 Agent runner — drives the PPT Master pipeline via LLM tool-calling.
 
-Uses the OpenAI-compatible API pointing to the LiteLLM proxy via
-host.docker.internal (Docker's hostname for the Mac host), which bypasses
-the nginx reverse proxy and any IP allowlist restrictions.
+Uses the OpenAI-compatible API pointing to the LiteLLM proxy.
 
 The agent reads SKILL.md (+ web-mode preamble) as its system prompt and
 executes the full serial pipeline:
@@ -64,12 +62,7 @@ async def run_job(
     """
     Main agent loop. Runs as an asyncio task.
     Drives the full PPT Master pipeline via OpenAI-compatible tool-calling.
-
-    Connects to the LiteLLM proxy via host.docker.internal (Mac host) on
-    port 4000, bypassing the nginx reverse proxy that blocks external IPs.
     """
-    # AGENT_BASE_URL should be http://host.docker.internal:4000/v1
-    # This resolves to the Mac host from inside Docker, bypassing nginx.
     agent_api_key = os.environ.get("AGENT_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
     agent_base_url = os.environ.get("AGENT_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "")
 
