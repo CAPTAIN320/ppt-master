@@ -919,6 +919,14 @@
             </p>
           </div>
         </div>
+        <div class="confirm-actions">
+          <button class="btn btn-confirm" id="confirm-submit-btn-top" onclick="submitConfirm()">
+            ✅ Confirm &amp; Continue
+          </button>
+          <button class="btn btn-ghost" onclick="resetConfirmFields()">
+            ↺ Reset
+          </button>
+        </div>
         <div class="confirm-fields" id="confirm-fields"></div>
         <div class="confirm-actions">
           <button class="btn btn-confirm" id="confirm-submit-btn" onclick="submitConfirm()">
@@ -1377,8 +1385,10 @@ async function submitConfirm() {
   if (!state.jobId) return;
 
   const btn = document.getElementById('confirm-submit-btn');
+  const btnTop = document.getElementById('confirm-submit-btn-top');
   btn.disabled = true;
   btn.innerHTML = '<div class="spinner"></div> Submitting…';
+  if (btnTop) { btnTop.disabled = true; btnTop.innerHTML = '<div class="spinner"></div> Submitting…'; }
 
   const choices = collectConfirmData();
 
@@ -1404,6 +1414,7 @@ async function submitConfirm() {
   } finally {
     btn.disabled = false;
     btn.innerHTML = '✅ Confirm &amp; Continue';
+    if (btnTop) { btnTop.disabled = false; btnTop.innerHTML = '✅ Confirm &amp; Continue'; }
   }
 }
 
