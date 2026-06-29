@@ -20,7 +20,7 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from .job_store import JobStore
-from .skill_prompt import get_system_prompt
+from .skill_prompt import get_skill_md, get_system_prompt
 from .tools import TOOL_DEFINITIONS, dispatch_tool
 
 REPO_ROOT = Path("/app")
@@ -121,6 +121,8 @@ async def run_job(
     user_message = _build_user_message(topic, canvas_format, model, uploaded_files)
 
     messages: list[dict[str, Any]] = [
+        {"role": "user", "content": get_skill_md()},
+        {"role": "assistant", "content": "I have read the SKILL.md pipeline. I am ready to begin."},
         {"role": "user", "content": user_message},
     ]
 
