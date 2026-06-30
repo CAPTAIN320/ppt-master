@@ -111,12 +111,12 @@ ppt-master/
 
 Creates a new generation job. Accepts `multipart/form-data`:
 
-| Field           | Type              | Default            | Description                        |
-| --------------- | ----------------- | ------------------ | ---------------------------------- |
-| `topic`         | `string` (form)   | required           | Presentation topic / description   |
-| `canvas_format` | `string` (form)   | `ppt169`           | Canvas format (`ppt169`, `ppt43`, `ppt1610`) |
-| `model`         | `string` (form)   | `claude-sonnet-4.6`| LLM model name                     |
-| `files`         | `UploadFile[]`    | `[]`               | Optional source files              |
+| Field           | Type            | Default             | Description                                  |
+| --------------- | --------------- | ------------------- | -------------------------------------------- |
+| `topic`         | `string` (form) | required            | Presentation topic / description             |
+| `canvas_format` | `string` (form) | `ppt169`            | Canvas format (`ppt169`, `ppt43`, `ppt1610`) |
+| `model`         | `string` (form) | `claude-sonnet-4.6` | LLM model name                               |
+| `files`         | `UploadFile[]`  | `[]`                | Optional source files                        |
 
 Uploaded files are saved to `/app/projects/uploads/{job_id}/{filename}`.
 
@@ -272,17 +272,17 @@ done
 
 **Storage**: SQLite at `/app/data/.job_store.db`. Schema:
 
-| Column           | Type   | Description                                      |
-| ---------------- | ------ | ------------------------------------------------ |
-| `id`             | TEXT   | UUID job identifier                              |
-| `status`         | TEXT   | State machine value (see above)                  |
-| `project_path`   | TEXT   | Path to generated project directory              |
-| `log`            | TEXT   | Accumulated text log (append-only)               |
-| `confirm_data`   | TEXT   | JSON recommendations from agent                  |
-| `confirm_result` | TEXT   | JSON choices submitted by user                   |
-| `error_message`  | TEXT   | Set on failure                                   |
-| `created_at`     | TEXT   | ISO 8601 UTC timestamp                           |
-| `updated_at`     | TEXT   | ISO 8601 UTC timestamp                           |
+| Column           | Type | Description                         |
+| ---------------- | ---- | ----------------------------------- |
+| `id`             | TEXT | UUID job identifier                 |
+| `status`         | TEXT | State machine value (see above)     |
+| `project_path`   | TEXT | Path to generated project directory |
+| `log`            | TEXT | Accumulated text log (append-only)  |
+| `confirm_data`   | TEXT | JSON recommendations from agent     |
+| `confirm_result` | TEXT | JSON choices submitted by user      |
+| `error_message`  | TEXT | Set on failure                      |
+| `created_at`     | TEXT | ISO 8601 UTC timestamp              |
+| `updated_at`     | TEXT | ISO 8601 UTC timestamp              |
 
 **In-memory structures** (module-level, lost on restart):
 
@@ -319,11 +319,11 @@ Two-column grid (360 px left panel + flexible right panel):
 
 ### Tabs
 
-| Tab       | Shown when          | Content                                                    |
-| --------- | ------------------- | ---------------------------------------------------------- |
-| **Log**   | Always              | Monospace streaming log with syntax-colored prefixes       |
+| Tab         | Shown when                        | Content                                                   |
+| ----------- | --------------------------------- | --------------------------------------------------------- |
+| **Log**     | Always                            | Monospace streaming log with syntax-colored prefixes      |
 | **Confirm** | `confirm_required` event received | Eight Confirmations form with top + bottom submit buttons |
-| **Slides** | First `slide_ready` event | SVG thumbnail grid; click to open lightbox |
+| **Slides**  | First `slide_ready` event         | SVG thumbnail grid; click to open lightbox                |
 
 ### WebSocket Client
 
@@ -335,14 +335,14 @@ Two-column grid (360 px left panel + flexible right panel):
 
 Log lines are colorized by prefix pattern (no server-side markup):
 
-| Pattern              | Color   |
-| -------------------- | ------- |
-| `[Agent]`            | Accent blue |
-| `[Tool]`             | Yellow  |
-| `[Tool result]`      | Muted   |
-| `$ ` (shell command) | Green   |
-| Contains `Error` / `❌` | Red  |
-| Contains `✅` / `complete` / `ready` | Green |
+| Pattern                              | Color       |
+| ------------------------------------ | ----------- |
+| `[Agent]`                            | Accent blue |
+| `[Tool]`                             | Yellow      |
+| `[Tool result]`                      | Muted       |
+| `$ ` (shell command)                 | Green       |
+| Contains `Error` / `❌`              | Red         |
+| Contains `✅` / `complete` / `ready` | Green       |
 
 ### Theme
 
@@ -352,12 +352,12 @@ Dark by default; toggleable to light via a header button. Preference persisted i
 
 ## File Storage
 
-| Path                              | Contents                                                  |
-| --------------------------------- | --------------------------------------------------------- |
-| `/app/projects/`                  | Generated project directories (one per job)               |
-| `/app/projects/uploads/{job_id}/` | Source files uploaded by the user for that job            |
+| Path                              | Contents                                                 |
+| --------------------------------- | -------------------------------------------------------- |
+| `/app/projects/`                  | Generated project directories (one per job)              |
+| `/app/projects/uploads/{job_id}/` | Source files uploaded by the user for that job           |
 | `/app/exports/`                   | Exported `.pptx` files; named `{job_id}.pptx` after copy |
-| `/app/data/.job_store.db`         | SQLite job state database                                 |
+| `/app/data/.job_store.db`         | SQLite job state database                                |
 
 `/app/projects/`, `/app/exports/`, and `/app/data/` are all bind-mounted from the host via `docker-compose.yml` so data persists across container restarts. The DB is kept in a separate `/app/data/` volume so that wiping `./projects/` on the host does not destroy job history, and so the volume mount order cannot shadow the database file before `_init_db()` runs.
 
@@ -367,16 +367,16 @@ Dark by default; toggleable to light via a header button. Preference persisted i
 
 All passed via `.env` / `docker-compose.yml`:
 
-| Variable          | Purpose                                                                 |
-| ----------------- | ----------------------------------------------------------------------- |
-| `AGENT_API_KEY`   | API key for the agent LLM endpoint (falls back to `OPENAI_API_KEY`)     |
-| `AGENT_BASE_URL`  | Base URL for the agent LLM endpoint (falls back to `OPENAI_BASE_URL`)   |
-| `AGENT_MODEL`     | Model name for the agent (default: `claude-sonnet-4.6`)                 |
-| `OPENAI_API_KEY`  | API key for image generation (and agent fallback)                       |
-| `OPENAI_BASE_URL` | Base URL for image generation (and agent fallback)                      |
-| `IMAGE_BACKEND`   | Image generation backend (default: `openai`)                            |
-| `OPENAI_MODEL`    | Image generation model (e.g. `gemini-2.5-flash-image`)                  |
-| `PYTHONUNBUFFERED`| Set to `1` in `docker-compose.yml` for real-time log streaming          |
+| Variable           | Purpose                                                               |
+| ------------------ | --------------------------------------------------------------------- |
+| `AGENT_API_KEY`    | API key for the agent LLM endpoint (falls back to `OPENAI_API_KEY`)   |
+| `AGENT_BASE_URL`   | Base URL for the agent LLM endpoint (falls back to `OPENAI_BASE_URL`) |
+| `AGENT_MODEL`      | Model name for the agent (default: `claude-sonnet-4.6`)               |
+| `OPENAI_API_KEY`   | API key for image generation (and agent fallback)                     |
+| `OPENAI_BASE_URL`  | Base URL for image generation (and agent fallback)                    |
+| `IMAGE_BACKEND`    | Image generation backend (default: `openai`)                          |
+| `OPENAI_MODEL`     | Image generation model (e.g. `gemini-2.5-flash-image`)                |
+| `PYTHONUNBUFFERED` | Set to `1` in `docker-compose.yml` for real-time log streaming        |
 
 `AGENT_BASE_URL` and `AGENT_API_KEY` allow the agent LLM to use a different endpoint from image generation — for example, pointing the agent at a local LiteLLM proxy via `host.docker.internal` while image generation uses a public proxy URL.
 
@@ -392,13 +392,13 @@ All passed via `.env` / `docker-compose.yml`:
 
 ### System Dependencies (installed via `apt-get`)
 
-| Package                  | Purpose                                  |
-| ------------------------ | ---------------------------------------- |
+| Package                                    | Purpose                     |
+| ------------------------------------------ | --------------------------- |
 | `libcairo2`, `libcairo2-dev`, `pkg-config` | Cairo for SVG rasterization |
-| `libpango-1.0-0`, `libpangocairo-1.0-0`   | Pango for text layout       |
-| `fonts-noto`, `fonts-noto-cjk`            | CJK font support            |
-| `pandoc`                 | Document conversion                      |
-| `curl`, `git`            | General utilities                        |
+| `libpango-1.0-0`, `libpangocairo-1.0-0`    | Pango for text layout       |
+| `fonts-noto`, `fonts-noto-cjk`             | CJK font support            |
+| `pandoc`                                   | Document conversion         |
+| `curl`, `git`                              | General utilities           |
 
 ### Python Dependencies
 
@@ -427,10 +427,9 @@ uvicorn web.server:app --host 0.0.0.0 --port 8080 --log-level info
 
 ### SQLite `no such table: jobs` on First Request
 
-**Problem**: `_init_db()` is called at module import time (when Python loads `job_store.py`). In Docker, the `./projects:/app/projects` bind-mount is applied *after* the Python process starts, so the DB file created by `_init_db()` inside the container layer is immediately shadowed by the empty host directory. All subsequent queries fail with `sqlite3.OperationalError: no such table: jobs`.
+**Problem**: `_init_db()` is called at module import time (when Python loads `job_store.py`). In Docker, the `./projects:/app/projects` bind-mount is applied _after_ the Python process starts, so the DB file created by `_init_db()` inside the container layer is immediately shadowed by the empty host directory. All subsequent queries fail with `sqlite3.OperationalError: no such table: jobs`.
 
 **Fix**: Moved `DB_PATH` from `/app/projects/.job_store.db` to `/app/data/.job_store.db`. A dedicated `./data:/app/data` bind-mount is added in `docker-compose.yml` and `mkdir -p /app/data` is added to the `Dockerfile`. Because `/app/data/` is a separate volume from `/app/projects/`, the mount order cannot shadow the database, and wiping `./projects/` on the host no longer destroys job history.
-
 
 ### Cloudflare WAF User-Agent Block
 
