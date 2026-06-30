@@ -16,6 +16,7 @@ python3 scripts/project_manager.py info <project_path>
 ```
 
 Notes:
+
 - Files outside the repo are copied into `sources/` by default
 - With `--move`, files outside the repo are moved into `sources/`
 - Files already inside the repo are moved into `sources/` by default (with a stderr
@@ -29,6 +30,7 @@ Notes:
   artifacts and a `decks[]` entry; re-importing the same stem replaces its entry.
 
 Common formats:
+
 - `ppt169`
 - `ppt43`
 - `xiaohongshu`
@@ -61,28 +63,6 @@ You can also run it directly for quick checks:
 python3 scripts/project_utils.py <project_path>
 ```
 
-## `batch_validate.py`
-
-Batch-check project structure and compliance.
-
-```bash
-python3 scripts/batch_validate.py examples
-python3 scripts/batch_validate.py examples projects
-python3 scripts/batch_validate.py --all
-python3 scripts/batch_validate.py examples --export
-```
-
-Use this for repository-wide health checks before release or cleanup.
-
-## `generate_examples_index.py`
-
-Rebuild `examples/README.md` automatically.
-
-```bash
-python3 scripts/generate_examples_index.py
-python3 scripts/generate_examples_index.py examples
-```
-
 ## `pptx_template_import.py`
 
 Unified PPTX preparation entry point for `/create-template`.
@@ -99,6 +79,7 @@ python3 scripts/pptx_template_import.py <template.pptx> --inheritance-mode layer
 ```
 
 Notes:
+
 - Extracts reusable media assets from `ppt/media/`
 - Summarizes slide size, theme colors, font metadata, and per-master theme metadata
 - Resolves slide / layout / master relationships from OOXML relationships; every master and layout is included even when no sample slide currently references it
@@ -120,6 +101,7 @@ Notes:
 - Intended for template reference preparation, not for final 1:1 template delivery
 
 Implementation note:
+
 - Internal helpers for this workflow live under `scripts/template_import/`
 
 ## `error_helper.py`

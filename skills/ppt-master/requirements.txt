@@ -77,8 +77,6 @@ openpyxl>=3.1.0
 # ─────────────────────────────────────────────────────────────
 # fix_image_aspect.py - Fix image aspect ratio (prevent stretching during PPT shape conversion)
 # fix_image_aspect.py - 修复图片宽高比（防止 PPT 转形状时拉伸）
-# gemini_watermark_remover.py - Remove watermarks from Gemini-generated images
-# gemini_watermark_remover.py - 去除 Gemini 生成图片的水印
 Pillow>=9.0.0
 numpy>=1.20.0
 

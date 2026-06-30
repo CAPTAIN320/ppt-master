@@ -222,8 +222,6 @@ Then install dependencies:
 pip install -r requirements.txt
 ```
 
-To update later (Option A / B): `python3 skills/ppt-master/scripts/update_repo.py`
-
 > **Option C — Skill marketplace**: the repo ships `.claude-plugin/marketplace.json`, so it can be installed through the [Claude Code plugin marketplace](https://code.claude.com/docs/en/plugin-marketplaces) ecosystem:
 >
 > ```bash

@@ -2,7 +2,7 @@
 
 > Architecture rationale (why provider-specific config keys instead of a generic `IMAGE_API_KEY`, why permissive license filter with strict-mode escape hatch, why external refs in dev but two divergent embedding strategies for delivery): see [docs/technical-design.md "Image Acquisition & Embedding"](../../../../docs/technical-design.md#image-acquisition--embedding).
 
-Image tools cover formula rendering, prompt-based AI generation, web image search, image inspection, and Gemini watermark removal.
+Image tools cover formula rendering, prompt-based AI generation, web image search, and image inspection.
 
 ## `latex_render.py`
 
@@ -234,22 +234,3 @@ Allowed licenses (default): CC0, Public Domain, Pexels License, Pixabay Content 
 
 The full role-level reference (intent → query translation, on-slide attribution visual specification) is in [`references/image-searcher.md`](../../references/image-searcher.md).
 
-## `gemini_watermark_remover.py`
-
-Remove Gemini watermark assets after manual download.
-
-```bash
-python3 scripts/gemini_watermark_remover.py <image_path>
-python3 scripts/gemini_watermark_remover.py <image_path> -o output_path.png
-python3 scripts/gemini_watermark_remover.py <image_path> -q
-```
-
-Notes:
-- Requires `scripts/assets/bg_48.png` and `scripts/assets/bg_96.png`
-- Best used after downloading “full size” Gemini images
-
-Dependencies:
-
-```bash
-pip install Pillow numpy
-```

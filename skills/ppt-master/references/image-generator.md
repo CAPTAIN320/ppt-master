@@ -589,8 +589,6 @@ If Path A's backend fails twice in a row:
 3. Report to user: filename, prompt used, error message.
 4. Fall through to **Offline Manual Mode** above.
 
-> If the alternate platform watermarks outputs (e.g. Gemini web), the repository includes `scripts/gemini_watermark_remover.py`.
-
 #### Guardrails (All Modes)
 
 **Hard rule**:

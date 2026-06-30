@@ -230,8 +230,6 @@ cd ppt-master
 pip install -r requirements.txt
 ```
 
-日常更新（方式 A / B）：`python3 skills/ppt-master/scripts/update_repo.py`
-
 > **方式 C — Skill marketplace**：仓库已添加 `.claude-plugin/marketplace.json` 元数据，可通过 [Claude Code plugin marketplace](https://code.claude.com/docs/en/plugin-marketplaces) 生态一行安装：
 >
 > ```bash
