@@ -1963,7 +1963,8 @@ document.addEventListener('keydown', e => {
   }
 
   // Arrow-key navigation — skip when focus is inside a text input
-  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' ||
+      e.key === 'ArrowUp'   || e.key === 'ArrowDown') {
     const tag = (e.target.tagName || '').toUpperCase();
     const isEditable = tag === 'INPUT' || tag === 'TEXTAREA' ||
                        e.target.isContentEditable;
@@ -1973,7 +1974,7 @@ document.addEventListener('keydown', e => {
     if (!isSlidesTabActive() && !isLightboxOpen()) return;
 
     e.preventDefault(); // prevent page scroll
-    navigateSlide(e.key === 'ArrowLeft' ? -1 : 1);
+    navigateSlide((e.key === 'ArrowLeft' || e.key === 'ArrowUp') ? -1 : 1);
   }
 });
 
