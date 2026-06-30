@@ -2251,6 +2251,9 @@ if (savedJobId) {
         document.getElementById('job-info').style.display = 'block';
         document.getElementById('job-id-display').textContent = savedJobId;
         setStatus(job.status);
+        // Restore button text to match the running state set by startJob()
+        document.getElementById('generate-btn-icon').textContent = '⏳';
+        document.getElementById('generate-btn-text').textContent = 'Running…';
         switchTab('log');
         connectWebSocket(savedJobId);
       } else {
