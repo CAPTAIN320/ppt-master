@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-DB_PATH = Path("/app/projects/.job_store.db")
+DB_PATH = Path("/app/data/.job_store.db")
 PROJECTS_DIR = Path("/app/projects")
 EXPORTS_DIR = Path("/app/exports")
 

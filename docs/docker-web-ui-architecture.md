@@ -56,7 +56,7 @@ Docker Container
   │     web_fetch    → fetch URL via web_to_md.py or urllib fallback
   │
   ├── Job Store (web/job_store.py)
-  │     SQLite at /app/projects/.job_store.db
+  │     SQLite at /app/data/.job_store.db
   │     Per-job asyncio.Event for confirm gate
   │     Per-job asyncio.Queue for WebSocket event streaming
   │
@@ -70,9 +70,10 @@ Docker Container
   │     finalize_svg.py, svg_to_pptx.py, …
   │
   └── Volume Mounts
-        /app/projects/          ← generated project files + SQLite job store
+        /app/projects/          ← generated project files
         /app/projects/uploads/  ← uploaded source files (per job_id subdirectory)
         /app/exports/           ← exported .pptx files
+        /app/data/              ← SQLite job store (isolated from project files)
 
 External APIs (configured via .env)
   • Agent LLM  — AGENT_BASE_URL / AGENT_API_KEY  (e.g. LiteLLM proxy or direct)
@@ -97,8 +98,9 @@ ppt-master/
 │   └── static/
 │       └── index.html     Single-file SPA (dark/light theme, 3 tabs)
 ├── skills/ppt-master/     UNCHANGED
-├── projects/              Volume mount (also holds .job_store.db)
-└── exports/               Volume mount
+├── projects/              Volume mount (generated project files)
+├── exports/               Volume mount
+└── data/                  Volume mount (SQLite job store)
 ```
 
 ---
@@ -268,7 +270,7 @@ done
     error
 ```
 
-**Storage**: SQLite at `/app/projects/.job_store.db`. Schema:
+**Storage**: SQLite at `/app/data/.job_store.db`. Schema:
 
 | Column           | Type   | Description                                      |
 | ---------------- | ------ | ------------------------------------------------ |
@@ -353,11 +355,11 @@ Dark by default; toggleable to light via a header button. Preference persisted i
 | Path                              | Contents                                                  |
 | --------------------------------- | --------------------------------------------------------- |
 | `/app/projects/`                  | Generated project directories (one per job)               |
-| `/app/projects/.job_store.db`     | SQLite job state database                                 |
 | `/app/projects/uploads/{job_id}/` | Source files uploaded by the user for that job            |
 | `/app/exports/`                   | Exported `.pptx` files; named `{job_id}.pptx` after copy |
+| `/app/data/.job_store.db`         | SQLite job state database                                 |
 
-Both `/app/projects/` and `/app/exports/` are bind-mounted from the host via `docker-compose.yml` so data persists across container restarts.
+`/app/projects/`, `/app/exports/`, and `/app/data/` are all bind-mounted from the host via `docker-compose.yml` so data persists across container restarts. The DB is kept in a separate `/app/data/` volume so that wiping `./projects/` on the host does not destroy job history, and so the volume mount order cannot shadow the database file before `_init_db()` runs.
 
 ---
 
@@ -422,6 +424,13 @@ uvicorn web.server:app --host 0.0.0.0 --port 8080 --log-level info
 ---
 
 ## Known Issues Fixed
+
+### SQLite `no such table: jobs` on First Request
+
+**Problem**: `_init_db()` is called at module import time (when Python loads `job_store.py`). In Docker, the `./projects:/app/projects` bind-mount is applied *after* the Python process starts, so the DB file created by `_init_db()` inside the container layer is immediately shadowed by the empty host directory. All subsequent queries fail with `sqlite3.OperationalError: no such table: jobs`.
+
+**Fix**: Moved `DB_PATH` from `/app/projects/.job_store.db` to `/app/data/.job_store.db`. A dedicated `./data:/app/data` bind-mount is added in `docker-compose.yml` and `mkdir -p /app/data` is added to the `Dockerfile`. Because `/app/data/` is a separate volume from `/app/projects/`, the mount order cannot shadow the database, and wiping `./projects/` on the host no longer destroys job history.
+
 
 ### Cloudflare WAF User-Agent Block
 

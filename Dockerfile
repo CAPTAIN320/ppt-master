@@ -32,8 +32,8 @@ RUN pip install --no-cache-dir \
 # Copy repo
 COPY . .
 
-# Ensure project/export dirs exist
-RUN mkdir -p /app/projects /app/exports
+# Ensure project/export/data dirs exist
+RUN mkdir -p /app/projects /app/exports /app/data
 
 EXPOSE 8080
 
