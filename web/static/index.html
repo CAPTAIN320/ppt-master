@@ -1859,6 +1859,8 @@ function selectSlide(slideNum) {
     viewerImg.src = url;
     viewerImg.alt = `Slide ${slideNum}`;
     viewerImg.style.display = 'block';
+    viewerImg.style.cursor = 'zoom-in';
+    viewerImg.onclick = () => openLightbox(url, slideNum);
     if (viewerEmpty) viewerEmpty.style.display = 'none';
   }
 }
@@ -1883,22 +1885,96 @@ function updateSlidesBadge() {
 }
 
 // ── Lightbox ───────────────────────────────────────────────────────────────
+// Tracks which slide (1-indexed) is currently shown in the lightbox.
+// null means the lightbox is closed.
+let lightboxSlideNum = null;
+
 function openLightbox(url, slideNum) {
   const lb = document.getElementById('lightbox');
   const img = document.getElementById('lightbox-img');
   img.src = url;
   img.alt = `Slide ${slideNum}`;
+  lightboxSlideNum = slideNum;
   lb.classList.add('open');
 }
 
 function closeLightbox(evt) {
   if (!evt || evt.target === document.getElementById('lightbox') || evt.target === document.getElementById('lightbox-close')) {
     document.getElementById('lightbox').classList.remove('open');
+    lightboxSlideNum = null;
+  }
+}
+
+// ── Arrow-key slide navigation ─────────────────────────────────────────────
+// Returns true if the Slides tab is currently the active tab.
+function isSlidesTabActive() {
+  const btn = document.querySelector('[data-tab="slides"]');
+  return btn ? btn.classList.contains('active') : false;
+}
+
+// Returns true if the lightbox overlay is currently open.
+function isLightboxOpen() {
+  return document.getElementById('lightbox').classList.contains('open');
+}
+
+/**
+ * Navigate slides by `delta` (+1 = next, -1 = previous).
+ * - When the lightbox is open: updates the lightbox image and syncs the strip selection.
+ * - When the lightbox is closed (Slides tab active): moves the strip selection only.
+ * Slide numbers are clamped to [1, state.slideCount].
+ */
+function navigateSlide(delta) {
+  if (state.slideCount === 0) return;
+
+  if (isLightboxOpen()) {
+    // Clamp within available slides
+    const next = Math.max(1, Math.min(state.slideCount, (lightboxSlideNum || 1) + delta));
+    if (next === lightboxSlideNum) return; // already at boundary
+    const item = document.getElementById(`strip-item-${next}`);
+    if (!item) return;
+    const url = item.dataset.url;
+    // Update lightbox image
+    const img = document.getElementById('lightbox-img');
+    img.src = url;
+    img.alt = `Slide ${next}`;
+    lightboxSlideNum = next;
+    // Keep strip selection in sync
+    selectSlide(next);
+  } else {
+    // Lightbox closed — navigate the strip selection
+    const items = document.querySelectorAll('.strip-item');
+    if (!items.length) return;
+    // Find currently selected item
+    let currentNum = 1;
+    items.forEach(el => {
+      if (el.classList.contains('selected')) {
+        currentNum = parseInt(el.dataset.slideNum, 10) || currentNum;
+      }
+    });
+    const next = Math.max(1, Math.min(state.slideCount, currentNum + delta));
+    selectSlide(next);
   }
 }
 
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') closeLightbox({ target: document.getElementById('lightbox') });
+  if (e.key === 'Escape') {
+    closeLightbox({ target: document.getElementById('lightbox') });
+    return;
+  }
+
+  // Arrow-key navigation — skip when focus is inside a text input
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    const tag = (e.target.tagName || '').toUpperCase();
+    const isEditable = tag === 'INPUT' || tag === 'TEXTAREA' ||
+                       e.target.isContentEditable;
+    if (isEditable) return;
+
+    // Only act when the Slides tab is active or the lightbox is open
+    if (!isSlidesTabActive() && !isLightboxOpen()) return;
+
+    e.preventDefault(); // prevent page scroll
+    navigateSlide(e.key === 'ArrowLeft' ? -1 : 1);
+  }
 });
 
 // ── Download bar ───────────────────────────────────────────────────────────
