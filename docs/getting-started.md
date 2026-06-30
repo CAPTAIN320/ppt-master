@@ -4,7 +4,6 @@ The short path to your first deck, how to use everything around it — templates
 
 - [Start from a template](#start-from-a-template)
 - [Generate your first deck](#generate-your-first-deck)
-- [Live preview & visual edits](#live-preview--visual-edits)
 - [Animations & transitions](#animations--transitions)
 - [Narration & video](#narration--video)
 - [Use a cloned voice](#use-a-cloned-voice)
@@ -76,7 +75,6 @@ A browser preview opens at `http://localhost:5050` while the deck is being gener
 
 PPT Master was chat-only by design; visual editing was folded in after enough users asked for it (built on [@WodenJay](https://github.com/WodenJay)'s [PR #85](https://github.com/hugohe3/ppt-master/pull/85)).
 
-Full guide → [Live Preview Workflow](../skills/ppt-master/workflows/live-preview.md)
 
 ---
 

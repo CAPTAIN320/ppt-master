@@ -197,16 +197,6 @@ async def dispatch_tool(
                 "returncode": 0,
             }
 
-        # Intercept svg_editor/server.py — not usable in Docker/web mode.
-        # The editor binds to 127.0.0.1 inside the container and is unreachable
-        # from the host browser. Slides are previewed via the Slides tab in the
-        # web UI. Blocking this prevents live_preview/ from being created.
-        if "svg_editor" in script:
-            return {
-                "output": "[Web UI] svg_editor/server.py is not used in web mode. Slides are previewed via the Slides tab in the browser UI. Skipping live preview launch.",
-                "returncode": 0,
-            }
-
         script_path = _resolve_path(script)
         cmd = ["python3", str(script_path)] + [str(a) for a in script_args]
         await store.append_log(job_id, f"\n$ {' '.join(cmd)}\n")

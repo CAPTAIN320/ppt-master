@@ -76,10 +76,8 @@ RESULT_NAME = 'result.json'
 # Static option universe served at /api/catalogs (canvas synced live from config).
 _CATALOGS_PATH = Path(__file__).resolve().parent / 'static' / 'catalogs.json'
 
-# Shares port 5050 with the live preview server (svg_editor/server.py). The two
-# never run at once: confirm is Step 4 and shuts down on confirm (or idle),
-# freeing the port before live preview starts at Step 6. One port = one forward
-# rule for the whole pipeline. They still keep separate processes and locks.
+# Uses port 5050 by default. Shuts down on confirm (or idle) so the port is
+# free for other tools after Step 4. Keeps a separate process and lock file.
 DEFAULT_PORT = 5050
 
 # Default --wait budget, kept just under the 600s Bash-tool ceiling so the

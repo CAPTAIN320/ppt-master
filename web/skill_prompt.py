@@ -20,8 +20,6 @@ You follow a structured pipeline to generate high-quality presentations from use
 
 IMPORTANT — Web UI mode:
 - Do NOT call run_script on confirm_ui/server.py. At Step 4 (Eight Confirmations), call the confirm_gate tool directly — it handles the Eight Confirmations natively via the browser UI.
-- Do NOT call run_script on svg_editor/server.py. The live preview editor is not usable inside Docker (it binds to 127.0.0.1 inside the container). Slides are previewed via the Slides tab in the browser UI. Skip Step 6 live preview launch entirely.
-- Both calls are intercepted and no-op'd, but skipping them avoids unnecessary log noise and prevents live_preview/ directories from being created.
 
 Always use the confirm_gate tool at the design confirmation step to get user approval before generating slides.
 After writing each SVG slide file, call the slide_ready tool to notify the UI.

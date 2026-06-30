@@ -29,7 +29,6 @@ For decks containing data charts, run [`verify-charts`](./verify-charts.md) firs
 
 - The project has no `svg_output/<page>.svg` files yet — finish Executor first
 - `svg_quality_checker.py` has not been run or has failed — fix static violations first
-- User has already applied annotations via `live-preview` workflow and is in a fixed-edit loop — describe changes directly, do not re-trigger rubric
 - The user has not asked for it — do not auto-invoke based on inferred model capability or deck size
 
 ---
@@ -41,14 +40,11 @@ For decks containing data charts, run [`verify-charts`](./verify-charts.md) firs
 pip install playwright
 python3 -m playwright install chromium
 
-# 2. live-preview server running for this project (provides inlined SVG fetch)
-python3 skills/ppt-master/scripts/svg_editor/server.py <project_path> --no-browser
-# (single instance per project — if it's already running, skip)
 ```
 
-The renderer (`visual_review.py`) does **not** auto-start the live-preview server. It expects the server to be reachable at `http://localhost:5050` (override with `--server-url`).
+The renderer (`visual_review.py`) expects a local HTTP server to be reachable at `http://localhost:5050` (override with `--server-url`).
 
-> **Why playwright, not cairosvg**: cairo's text API has no font-fallback chain, so CJK characters render as tofu boxes for any deck whose font-family list relies on system fallback (Microsoft YaHei / PingFang SC / etc.). Playwright drives a real chromium and produces output identical to what the live-preview browser shows — the only fidelity-preserving option for bilingual decks.
+> **Why playwright, not cairosvg**: cairo's text API has no font-fallback chain, so CJK characters render as tofu boxes for any deck whose font-family list relies on system fallback (Microsoft YaHei / PingFang SC / etc.). Playwright drives a real chromium and produces output identical to what a browser shows — the only fidelity-preserving option for bilingual decks.
 
 ---
 
@@ -58,12 +54,12 @@ The renderer (`visual_review.py`) does **not** auto-start the live-preview serve
 python3 skills/ppt-master/scripts/visual_review.py <project_path>
 ```
 
-This writes one PNG per page to `<project_path>/.preview/<page>.png` at 1280×720, with `<use data-icon>` inlined and `<image href>` resolved exactly as the live-preview browser sees them. Renders are serialized via a project-local file lock — safe to invoke concurrently.
+This writes one PNG per page to `<project_path>/.preview/<page>.png` at 1280×720, with `<use data-icon>` inlined and `<image href>` resolved exactly as a browser sees them. Renders are serialized via a project-local file lock — safe to invoke concurrently.
 
 Exit codes:
 
 - `0` — all pages rendered
-- `2` — live-preview server unreachable (start it per Prerequisites)
+- `2` — server unreachable (check Prerequisites)
 - `3` — playwright python / chromium not installed (or browser failed to launch)
 - `4` — one or more page-level render failures (see stderr; partial output is on disk)
 

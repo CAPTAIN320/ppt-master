@@ -1432,8 +1432,7 @@ def convert_text(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
             a, b, c, d, e, f = parse_transform_matrix(text_transform)
         except Exception:
             a, b, c, d, e, f = 1.0, 0.0, 0.0, 1.0, 0.0, 0.0
-        # A pure-translate transform on a text element (hand-authored, or written
-        # by a live-preview move) was otherwise ignored here, drifting the text.
+        # A pure-translate transform on a text element (hand-authored or moved in an editor) was otherwise ignored here, drifting the text.
         # Absorb the translation into the frame position; a scaling transform
         # would also need to scale font size / line metrics, so leave
         # non-translate transforms alone.

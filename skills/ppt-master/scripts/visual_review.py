@@ -2,7 +2,7 @@
 """
 PPT Master - Visual Review Renderer
 
-Renders project SVGs to 1280x720 PNGs that match the live-preview browser view
+Renders project SVGs to 1280x720 PNGs via a local HTTP server
 (inlined <use data-icon>, resolved <image href>, full font fallback including CJK).
 The pure renderer for the visual-review workflow — does not edit SVGs, does not
 interpret the rubric.
@@ -18,7 +18,7 @@ Usage:
 
 Exit codes (per references/visual-review.md §7):
     0 — all requested pages rendered
-    2 — live-preview server not reachable for this project
+    2 — server not reachable for this project
     3 — rendering backend (playwright + chromium) missing or unable to launch
     4 — one or more page-level render failures (details in stderr)
 
@@ -216,7 +216,7 @@ def check_server(server_url: str) -> None:
             if resp.status != 200:
                 raise RuntimeError(f'{url} returned HTTP {resp.status}')
     except urllib.error.URLError as e:
-        raise RuntimeError(f'live-preview server not reachable at {server_url}: {e}')
+        raise RuntimeError(f'server not reachable at {server_url}: {e}')
 
 
 def main() -> int:
@@ -260,8 +260,7 @@ def main() -> int:
     except RuntimeError as e:
         _safe_print(str(e))
         _safe_print(
-            'start it with:\n'
-            f'    python3 skills/ppt-master/scripts/svg_editor/server.py {project_path}'
+            'Ensure a local HTTP server is running that serves the project SVGs at the given --server-url.'
         )
         return 2
 

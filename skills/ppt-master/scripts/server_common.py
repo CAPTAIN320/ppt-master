@@ -3,7 +3,7 @@
 PPT Master - Local Preview Server Helpers
 
 Shared per-project mutual-exclusion (lock) and liveness helpers for the local
-Flask preview servers (`svg_editor/server.py`, `confirm_ui/server.py`). Each
+Flask preview servers (`confirm_ui/server.py`). Each
 server keeps its own lock filename and Flask app; this module owns only the
 cross-platform process-liveness check and the claim/read/release lock logic so
 the two servers cannot drift apart.

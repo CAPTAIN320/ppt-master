@@ -228,12 +228,12 @@ Larger K is **not** always better: subagent context fills with prior pages' SVG 
 
 `visual_review.py <project> [pages...]` must guarantee:
 
-- Output PNG matches what the user would see in the live-preview browser (inlined `<use data-icon>`, resolved `<image href>`)
+- Output PNG matches what the user would see in a browser (inlined `<use data-icon>`, resolved `<image href>`)
 - Output dimensions = 1280 × 720
 - File-lock serialization at `<project>/.preview/.render.lock`
 - Clean exit codes:
   - `0` — all requested pages rendered
-  - `2` — live-preview server not running for this project (subagent should not retry; surfaces to the orchestrator)
+  - `2` — server not running for this project (subagent should not retry; surfaces to the orchestrator)
   - `3` — rendering backend (playwright + chromium) missing or unable to launch (config error, surface to user)
   - `4` — page-level render failure (specific failures listed in stderr; partial output is acceptable)
 
