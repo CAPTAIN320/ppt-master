@@ -28,6 +28,7 @@ from typing import Any, Optional
 
 DB_PATH = Path("/app/data/.job_store.db")
 PROJECTS_DIR = Path("/app/projects")
+EXAMPLES_DIR = Path("/app/examples")
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -247,6 +248,62 @@ class JobStore:
 
         # Sort all results by created_at descending
         result.sort(key=lambda j: j.get("created_at") or "", reverse=True)
+        return result
+
+    def list_examples(self) -> list[dict]:
+        """Scan /app/examples/ and return synthetic job entries for each example deck.
+
+        An example directory qualifies when it contains svg_output/ or svg_final/
+        with at least one .svg file.  Entries are sorted by directory name.
+        """
+        result = []
+        if not EXAMPLES_DIR.exists():
+            return result
+
+        for ex_dir in sorted(EXAMPLES_DIR.iterdir()):
+            if not ex_dir.is_dir():
+                continue
+            if ex_dir.name.startswith("."):
+                continue
+
+            # Prefer svg_output; fall back to svg_final
+            svg_dir = ex_dir / "svg_output"
+            if not svg_dir.is_dir():
+                svg_dir = ex_dir / "svg_final"
+            if not svg_dir.is_dir():
+                continue
+
+            svgs = list(svg_dir.glob("*.svg"))
+            if not svgs:
+                continue
+
+            slide_count = len(svgs)
+
+            # Directory mtime as created_at / updated_at
+            try:
+                mtime = ex_dir.stat().st_mtime
+                ts = datetime.utcfromtimestamp(mtime).isoformat()
+            except OSError:
+                ts = datetime.utcnow().isoformat()
+
+            # Humanize: strip leading format prefix (ppt169_, ppt43_, ppt1610_)
+            name = ex_dir.name
+            name = re.sub(r'^ppt\d+_', '', name)
+            topic = name.replace("_", " ")
+
+            result.append({
+                "id": ex_dir.name,
+                "status": "done",
+                "topic": topic,
+                "project_path": str(ex_dir),
+                "slide_count": slide_count,
+                "created_at": ts,
+                "updated_at": ts,
+                "download_url": f"/jobs/{ex_dir.name}/download",
+                "synthetic": True,
+                "is_example": True,
+            })
+
         return result
 
     def set_error(self, job_id: str, message: str) -> None:

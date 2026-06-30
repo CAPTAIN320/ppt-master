@@ -42,6 +42,7 @@ app = FastAPI(title="PPT Master", version="1.0.0")
 REPO_ROOT = Path("/app")
 STATIC_DIR = Path(__file__).parent / "static"
 UPLOADS_DIR = REPO_ROOT / "projects" / "uploads"
+EXAMPLES_DIR = REPO_ROOT / "examples"
 
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -68,6 +69,13 @@ async def list_jobs():
     """Return all completed jobs with metadata for the Library tab."""
     jobs = store.list_jobs()
     return JSONResponse(jobs)
+
+
+@app.get("/examples")
+async def list_examples():
+    """Return synthetic job entries for all example decks in /app/examples/."""
+    examples = store.list_examples()
+    return JSONResponse(examples)
 
 
 @app.post("/jobs")
@@ -155,11 +163,38 @@ async def delete_job(job_id: str):
 @app.get("/jobs/{job_id}")
 async def get_job(job_id: str):
     job = store.get_job(job_id)
-    if job is None:
+    if job is not None:
+        # Don't return the full log in the status endpoint (can be huge)
+        job_summary = {k: v for k, v in job.items() if k != "log"}
+        return JSONResponse(job_summary)
+
+    # Fallback 1: orphan project directory (synthetic entry, not in DB)
+    proj_dir = REPO_ROOT / "projects" / job_id
+    if not proj_dir.is_dir():
+        # Fallback 2: example directory
+        proj_dir = EXAMPLES_DIR / job_id
+    if not proj_dir.is_dir():
         raise HTTPException(status_code=404, detail="Job not found")
-    # Don't return the full log in the status endpoint (can be huge)
-    job_summary = {k: v for k, v in job.items() if k != "log"}
-    return JSONResponse(job_summary)
+
+    # Build a synthetic job summary from the directory
+    svg_dir = proj_dir / "svg_output"
+    if not svg_dir.is_dir():
+        svg_dir = proj_dir / "svg_final"
+    slide_count = len(list(svg_dir.glob("*.svg"))) if svg_dir.is_dir() else 0
+
+    name = proj_dir.name
+    name = re.sub(r'^ppt\d+_', '', name)
+    topic = name.replace("_", " ")
+
+    return JSONResponse({
+        "id": job_id,
+        "status": "done",
+        "topic": topic,
+        "project_path": str(proj_dir),
+        "slide_count": slide_count,
+        "download_url": f"/jobs/{job_id}/download",
+        "synthetic": True,
+    })
 
 
 # ── WebSocket log stream ──────────────────────────────────────────────────────
@@ -257,9 +292,8 @@ def _inline_svg_images(svg_text: str, svg_dir: Path) -> str:
 async def get_slide(job_id: str, slide_number: int):
     """Serve the SVG file for a given slide number, with images inlined as data URIs.
 
-    Falls back to treating job_id as a project directory name under /app/projects/
-    when the job is not found in the DB (orphan projects created before the Library
-    feature existed).
+    Falls back to treating job_id as a project directory name under /app/projects/,
+    then under /app/examples/, when the job is not found in the DB.
     """
     job = store.get_job(job_id)
 
@@ -269,8 +303,11 @@ async def get_slide(job_id: str, slide_number: int):
             raise HTTPException(status_code=404, detail="Project path not set yet")
         proj_dir = Path(project_path)
     else:
-        # Fallback: treat job_id as a project directory name
+        # Fallback 1: orphan project directory
         proj_dir = REPO_ROOT / "projects" / job_id
+        if not proj_dir.is_dir():
+            # Fallback 2: example directory
+            proj_dir = EXAMPLES_DIR / job_id
         if not proj_dir.is_dir():
             raise HTTPException(status_code=404, detail="Job not found")
 
@@ -396,7 +433,13 @@ async def debug_test_llm():
 
 
 def _resolve_proj_dir(job_id: str) -> Path:
-    """Resolve the project directory for a job, raising HTTPException on failure."""
+    """Resolve the project directory for a job, raising HTTPException on failure.
+
+    Resolution order:
+    1. DB job row → project_path (with Docker-internal path remap)
+    2. /app/projects/{job_id}  (orphan project directories)
+    3. /app/examples/{job_id}  (example decks)
+    """
     job = store.get_job(job_id)
     if job is not None:
         project_path_str = job.get("project_path")
@@ -408,10 +451,11 @@ def _resolve_proj_dir(job_id: str) -> Path:
         if not proj_dir.exists() and proj_dir.parts[:3] == ('/', 'app', 'projects'):
             proj_dir = REPO_ROOT / "projects" / proj_dir.name
     else:
-        # Fallback: treat job_id as a project directory name (orphan entries).
+        # Fallback 1: orphan project directory
         proj_dir = REPO_ROOT / "projects" / job_id
         if not proj_dir.is_dir():
-            raise HTTPException(status_code=404, detail="Job not found")
+            # Fallback 2: example directory
+            proj_dir = EXAMPLES_DIR / job_id
 
     if not proj_dir.is_dir():
         raise HTTPException(status_code=404, detail=f"Project directory not found: {proj_dir}")

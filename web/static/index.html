@@ -879,6 +879,27 @@
       gap: 16px;
     }
 
+    /* ── Library section headings ─────────────────────────────────────────── */
+    .library-section {
+      margin-bottom: 28px;
+    }
+
+    .library-section-heading {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.4px;
+      margin-bottom: 14px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .library-section-empty {
+      font-size: 12px;
+      color: var(--text-dim);
+      padding: 14px 0 4px;
+    }
+
     .library-card {
       background: var(--bg-card);
       border: 1px solid var(--border);
@@ -1089,7 +1110,7 @@
   <header id="header">
     <div class="logo">
       <div class="logo-icon">🎯</div>
-      <span>PPT Master</span>
+      <span>Stella AI</span>
       <span class="tagline">AI Presentation Generator</span>
     </div>
     <div class="spacer"></div>
@@ -1283,11 +1304,24 @@
           <div class="spinner" style="width:24px;height:24px;border-width:3px;color:var(--accent);"></div>
           <span>Loading library…</span>
         </div>
-        <div class="library-empty" id="library-empty" style="display:none;">
-          <div class="library-empty-icon">📁</div>
-          <div class="library-empty-text">No completed presentations yet.</div>
+
+        <!-- Your Presentations section -->
+        <div class="library-section" id="section-your-presentations">
+          <h3 class="library-section-heading">Your Presentations</h3>
+          <div class="library-grid" id="library-grid"></div>
+          <div class="library-section-empty" id="library-jobs-empty" style="display:none;">
+            No completed presentations yet.
+          </div>
         </div>
-        <div class="library-grid" id="library-grid"></div>
+
+        <!-- Example Decks section -->
+        <div class="library-section" id="section-examples">
+          <h3 class="library-section-heading">Example Decks</h3>
+          <div class="library-grid" id="examples-grid"></div>
+          <div class="library-section-empty" id="library-examples-empty" style="display:none;">
+            No example decks found.
+          </div>
+        </div>
       </div>
     </div>
 
@@ -2081,72 +2115,96 @@ function initSidebar() {
 }
 
 // ── Library ────────────────────────────────────────────────────────────────
+
+/**
+ * Build a single library card element and return it.
+ * Used for both user jobs and example decks so the template is never duplicated.
+ *
+ * @param {object} job        - Job/example entry from the API
+ * @param {boolean} showDelete - Whether to show the delete button (false for examples)
+ */
+function buildLibraryCard(job, showDelete) {
+  const title      = job.topic || job.id;
+  const slideCount = job.slide_count || 0;
+  const createdAt  = job.created_at ? new Date(job.created_at + 'Z').toLocaleString() : '—';
+  const thumbUrl   = slideCount > 0 ? `/jobs/${job.id}/slides/1` : null;
+
+  const card = document.createElement('div');
+  card.className = 'library-card';
+  card.dataset.jobId = job.id;
+  card.innerHTML = `
+    <div class="library-card-thumb">
+      ${thumbUrl
+        ? `<img src="${thumbUrl}" alt="Slide 1 of ${escHtml(title)}"
+                onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" loading="lazy" />
+           <div class="library-card-thumb-placeholder" style="display:none;">🖼</div>`
+        : `<div class="library-card-thumb-placeholder">🖼</div>`
+      }
+    </div>
+    <div class="library-card-body">
+      <div class="library-card-title" title="${escAttr(title)}">${escHtml(title)}</div>
+      <div class="library-card-meta">
+        <span>🗓 ${escHtml(createdAt)}</span>
+        ${slideCount ? `<span>· ${slideCount} slide${slideCount !== 1 ? 's' : ''}</span>` : ''}
+      </div>
+    </div>
+    <div class="library-card-actions">
+      ${slideCount > 0 ? `<button class="btn btn-view-slides" onclick="loadJobSlides('${job.id}')">▶ View Slides</button>` : ''}
+      <button class="btn btn-lib-download" id="dl-btn-${job.id}" onclick="downloadPresentation('${job.id}', '${escAttr(title)}')" title="Download PPTX">⬇ PPTX</button>
+      ${showDelete ? `<button class="btn btn-lib-delete" onclick="deletePresentation('${job.id}')" title="Delete presentation">🗑</button>` : ''}
+    </div>
+  `;
+  return card;
+}
+
 async function loadLibrary() {
-  const grid    = document.getElementById('library-grid');
-  const loading = document.getElementById('library-loading');
-  const empty   = document.getElementById('library-empty');
+  const jobsGrid    = document.getElementById('library-grid');
+  const exGrid      = document.getElementById('examples-grid');
+  const loading     = document.getElementById('library-loading');
+  const jobsEmpty   = document.getElementById('library-jobs-empty');
+  const exEmpty     = document.getElementById('library-examples-empty');
 
-  grid.innerHTML = '';
-  loading.style.display = 'flex';
-  empty.style.display   = 'none';
+  jobsGrid.innerHTML = '';
+  exGrid.innerHTML   = '';
+  loading.style.display  = 'flex';
+  jobsEmpty.style.display = 'none';
+  exEmpty.style.display   = 'none';
 
-  let jobs = [];
+  // Fetch both endpoints in parallel
+  let jobs = [], examples = [];
   try {
-    const resp = await fetch('/jobs');
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    jobs = await resp.json();
+    const [jobsResp, exResp] = await Promise.all([
+      fetch('/jobs'),
+      fetch('/examples'),
+    ]);
+    if (!jobsResp.ok) throw new Error(`/jobs HTTP ${jobsResp.status}`);
+    if (!exResp.ok)   throw new Error(`/examples HTTP ${exResp.status}`);
+    [jobs, examples] = await Promise.all([jobsResp.json(), exResp.json()]);
   } catch (err) {
     loading.style.display = 'none';
-    empty.style.display   = 'flex';
-    empty.querySelector('.library-empty-text').textContent = `Failed to load library: ${err.message}`;
+    jobsEmpty.style.display = 'block';
+    jobsEmpty.textContent = `Failed to load library: ${err.message}`;
     return;
   }
 
   loading.style.display = 'none';
 
-  if (!jobs.length) {
-    empty.style.display = 'flex';
-    empty.querySelector('.library-empty-text').textContent = 'No completed presentations yet.';
-    return;
+  // ── Your Presentations ──────────────────────────────────────────────────
+  if (jobs.length === 0) {
+    jobsEmpty.style.display = 'block';
+  } else {
+    jobs.forEach(job => jobsGrid.appendChild(buildLibraryCard(job, true)));
+  }
+
+  // ── Example Decks ───────────────────────────────────────────────────────
+  if (examples.length === 0) {
+    exEmpty.style.display = 'block';
+  } else {
+    examples.forEach(ex => exGrid.appendChild(buildLibraryCard(ex, false)));
   }
 
   // Mark library as loaded so switchTab('library') won't re-fetch on every click.
   libraryLoaded = true;
-
-  jobs.forEach(job => {
-    const title      = job.topic || job.id;
-    const slideCount = job.slide_count || 0;
-    const createdAt  = job.created_at ? new Date(job.created_at + 'Z').toLocaleString() : '—';
-    const thumbUrl   = slideCount > 0 ? `/jobs/${job.id}/slides/1` : null;
-    const downloadUrl = job.download_url || `/jobs/${job.id}/download`;
-
-    const card = document.createElement('div');
-    card.className = 'library-card';
-    card.dataset.jobId = job.id;
-    card.innerHTML = `
-      <div class="library-card-thumb">
-        ${thumbUrl
-          ? `<img src="${thumbUrl}" alt="Slide 1 of ${escHtml(title)}"
-                  onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" loading="lazy" />
-             <div class="library-card-thumb-placeholder" style="display:none;">🖼</div>`
-          : `<div class="library-card-thumb-placeholder">🖼</div>`
-        }
-      </div>
-      <div class="library-card-body">
-        <div class="library-card-title" title="${escAttr(title)}">${escHtml(title)}</div>
-        <div class="library-card-meta">
-          <span>🗓 ${escHtml(createdAt)}</span>
-          ${slideCount ? `<span>· ${slideCount} slide${slideCount !== 1 ? 's' : ''}</span>` : ''}
-        </div>
-      </div>
-      <div class="library-card-actions">
-        ${slideCount > 0 ? `<button class="btn btn-view-slides" onclick="loadJobSlides('${job.id}')">▶ View Slides</button>` : ''}
-        <button class="btn btn-lib-download" id="dl-btn-${job.id}" onclick="downloadPresentation('${job.id}', '${escAttr(title)}')" title="Download PPTX">⬇ PPTX</button>
-        <button class="btn btn-lib-delete" onclick="deletePresentation('${job.id}')" title="Delete presentation">🗑</button>
-      </div>
-    `;
-    grid.appendChild(card);
-  });
 }
 
 async function downloadPresentation(jobId, title) {
@@ -2222,17 +2280,17 @@ async function deletePresentation(jobId) {
       throw new Error(detail);
     }
 
-    // Remove the card from the DOM
+    // Remove the card from the DOM (only user-job cards have a delete button)
     const card = document.querySelector(`.library-card[data-job-id="${jobId}"]`);
     if (card) card.remove();
 
-    // If the grid is now empty, show the empty state
+    // If the user-jobs grid is now empty, show the section empty state
     const grid = document.getElementById('library-grid');
     if (grid && grid.children.length === 0) {
-      const empty = document.getElementById('library-empty');
+      const empty = document.getElementById('library-jobs-empty');
       if (empty) {
-        empty.style.display = 'flex';
-        empty.querySelector('.library-empty-text').textContent = 'No completed presentations yet.';
+        empty.style.display = 'block';
+        empty.textContent = 'No completed presentations yet.';
       }
     }
 
@@ -2270,7 +2328,9 @@ async function loadJobSlides(jobId) {
   document.getElementById('slides-badge').style.display = 'none';
   document.getElementById('slides-badge').textContent = '0';
 
-  // Fetch job metadata to get slide_count
+  // Fetch job metadata to get slide_count.
+  // GET /jobs/{job_id} now falls back to orphan project dirs and example dirs,
+  // so this works for both real jobs and example/synthetic entries.
   let slideCount = 0;
   try {
     const resp = await fetch(`/jobs/${jobId}`);
@@ -2280,11 +2340,12 @@ async function loadJobSlides(jobId) {
     }
   } catch (_) { /* fall through to probe */ }
 
-  // If slide_count is 0 or unknown, probe until 404
+  // If slide_count is 0 or unknown, probe until 404 using GET
+  // (HEAD is not supported by the slides endpoint).
   if (slideCount === 0) {
     let n = 1;
     while (true) {
-      const probe = await fetch(`/jobs/${jobId}/slides/${n}`, { method: 'HEAD' });
+      const probe = await fetch(`/jobs/${jobId}/slides/${n}`);
       if (!probe.ok) break;
       n++;
       if (n > 200) break; // safety cap
