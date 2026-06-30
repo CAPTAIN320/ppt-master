@@ -87,7 +87,8 @@ def _build_user_message(
         f"Follow the full PPT Master pipeline from SKILL.md.\n"
         f"Use the confirm_gate tool at Step 4 (Eight Confirmations).\n"
         f"Use the slide_ready tool after writing each SVG page.\n"
-        f"Run the post-processing steps (finalize_svg.py, svg_to_pptx.py) when done."
+        f"Run finalize_svg.py when done. Do NOT run svg_to_pptx.py — "
+        f"PPTX export is handled on demand by the server when the user clicks Download."
     )
 
     return "\n\n".join(parts)

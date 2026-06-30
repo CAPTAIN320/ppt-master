@@ -25,11 +25,12 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 
 import aiofiles
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -394,16 +395,8 @@ async def debug_test_llm():
 # ── PPTX download (on-demand) ─────────────────────────────────────────────────
 
 
-@app.get("/jobs/{job_id}/download")
-async def download_pptx(job_id: str):
-    """On-demand PPTX export.
-
-    Looks up the job's ``project_path`` from the DB, runs ``svg_to_pptx.py``
-    synchronously as a subprocess, then streams the resulting ``.pptx`` back as
-    a file download.  The download is user-initiated so the synchronous wait is
-    acceptable.
-    """
-    # 1. Resolve project directory from DB (or fall back to directory name).
+def _resolve_proj_dir(job_id: str) -> Path:
+    """Resolve the project directory for a job, raising HTTPException on failure."""
     job = store.get_job(job_id)
     if job is not None:
         project_path_str = job.get("project_path")
@@ -422,40 +415,52 @@ async def download_pptx(job_id: str):
 
     if not proj_dir.is_dir():
         raise HTTPException(status_code=404, detail=f"Project directory not found: {proj_dir}")
+    return proj_dir
 
-    # 2. Run svg_to_pptx.py synchronously and wait for it to finish.
+
+def _run_svg_to_pptx(proj_dir: Path, tmp_path: Path) -> None:
+    """Run svg_to_pptx.py, writing output to tmp_path. Raises HTTPException on failure."""
     script_path = REPO_ROOT / "skills" / "ppt-master" / "scripts" / "svg_to_pptx.py"
     result = subprocess.run(
-        ["python3", str(script_path), str(proj_dir)],
+        ["python3", str(script_path), str(proj_dir), "-o", str(tmp_path)],
         cwd=str(REPO_ROOT),
         capture_output=True,
     )
-
     if result.returncode != 0:
         stderr_text = result.stderr.decode("utf-8", errors="replace")
         raise HTTPException(
             status_code=500,
             detail=f"svg_to_pptx.py failed (exit {result.returncode}):\n{stderr_text}",
         )
+    if not tmp_path.exists():
+        raise HTTPException(status_code=500, detail="Export succeeded but no PPTX file was produced")
 
-    # 3. Find the generated PPTX inside the project directory.
-    pptx_candidates: list[Path] = sorted(
-        proj_dir.rglob("*.pptx"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
 
-    if not pptx_candidates:
-        raise HTTPException(status_code=500, detail="Export succeeded but no PPTX file was found")
+@app.get("/jobs/{job_id}/download")
+async def download_pptx(job_id: str, background_tasks: BackgroundTasks):
+    """On-demand PPTX export — generates from SVG on every request, streams, then deletes the temp file.
 
-    pptx_path = pptx_candidates[0]
+    No PPTX is saved permanently. The file exists on disk only for the duration
+    of the HTTP response.
+    """
+    proj_dir = _resolve_proj_dir(job_id)
     project_name = proj_dir.name
 
-    # 4. Stream the PPTX as a file download.
+    # Write to a temp file so svg_to_pptx.py has a concrete output path.
+    tmp_fd, tmp_name = tempfile.mkstemp(suffix=".pptx")
+    os.close(tmp_fd)
+    tmp_path = Path(tmp_name)
+
+    _run_svg_to_pptx(proj_dir, tmp_path)
+
+    # Schedule deletion after the response is fully streamed.
+    background_tasks.add_task(tmp_path.unlink, True)
+
     return FileResponse(
-        str(pptx_path),
+        str(tmp_path),
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
         filename=f"{project_name}.pptx",
+        background=background_tasks,
     )
 
 
@@ -463,65 +468,26 @@ async def download_pptx(job_id: str):
 
 
 @app.post("/jobs/{job_id}/export")
-async def export_pptx(job_id: str):
-    """Generate a PPTX on-demand by running svg_to_pptx.py against the project's SVG files.
+async def export_pptx(job_id: str, background_tasks: BackgroundTasks):
+    """Generate a PPTX on-demand from SVG files — no file is saved permanently.
 
-    Looks up the project_path from the DB, or falls back to treating job_id as a
-    project directory name under /app/projects/ for orphan (synthetic) entries.
-    Runs svg_to_pptx.py synchronously and streams the resulting PPTX back as a
-    file download.
+    Identical logic to GET /jobs/{job_id}/download; kept as a separate POST
+    endpoint for clients that prefer it.
     """
-    # 1. Resolve project_path
-    job = store.get_job(job_id)
-    if job is not None:
-        project_path_str = job.get("project_path")
-        if not project_path_str:
-            raise HTTPException(status_code=404, detail="Project path not set for this job")
-        proj_dir = Path(project_path_str)
-        # Remap Docker-internal /app/projects/... to the actual mount point when
-        # running outside Docker (e.g. tests on host).
-        if not proj_dir.exists() and proj_dir.parts[:3] == ('/', 'app', 'projects'):
-            proj_dir = REPO_ROOT / "projects" / proj_dir.name
-    else:
-        # Fallback: treat job_id as a project directory name
-        proj_dir = REPO_ROOT / "projects" / job_id
-        if not proj_dir.is_dir():
-            raise HTTPException(status_code=404, detail="Job not found")
+    proj_dir = _resolve_proj_dir(job_id)
+    project_name = proj_dir.name
 
-    if not proj_dir.is_dir():
-        raise HTTPException(status_code=404, detail=f"Project directory not found: {proj_dir}")
+    tmp_fd, tmp_name = tempfile.mkstemp(suffix=".pptx")
+    os.close(tmp_fd)
+    tmp_path = Path(tmp_name)
 
-    # 2. Run svg_to_pptx.py synchronously and wait for it to finish.
-    script_path = REPO_ROOT / "skills" / "ppt-master" / "scripts" / "svg_to_pptx.py"
-    result = subprocess.run(
-        ["python3", str(script_path), str(proj_dir)],
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-    )
+    _run_svg_to_pptx(proj_dir, tmp_path)
 
-    if result.returncode != 0:
-        stderr_text = result.stderr.decode("utf-8", errors="replace")
-        raise HTTPException(
-            status_code=500,
-            detail=f"svg_to_pptx.py failed (exit {result.returncode}):\n{stderr_text}",
-        )
+    background_tasks.add_task(tmp_path.unlink, True)
 
-    # 3. Find the generated PPTX inside the project directory.
-    pptx_candidates: list[Path] = sorted(
-        proj_dir.rglob("*.pptx"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-
-    if not pptx_candidates:
-        raise HTTPException(status_code=500, detail="Export succeeded but no PPTX file was found")
-
-    pptx_path = pptx_candidates[0]
-
-    # 4. Return the PPTX as a download.
     return FileResponse(
-        str(pptx_path),
+        str(tmp_path),
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        headers={"Content-Disposition": f'attachment; filename="{pptx_path.name}"'},
-        filename=pptx_path.name,
+        filename=f"{project_name}.pptx",
+        background=background_tasks,
     )

@@ -25,7 +25,8 @@ Running confirm_ui/server.py as a subprocess is a no-op in web mode and will be 
 
 Always use the confirm_gate tool at the design confirmation step to get user approval before generating slides.
 After writing each SVG slide file, call the slide_ready tool to notify the UI.
-Run the post-processing steps (finalize_svg.py, svg_to_pptx.py) when the pipeline is complete.
+Run finalize_svg.py when the pipeline is complete. Do NOT run svg_to_pptx.py — \
+PPTX export is handled on demand by the server when the user clicks Download.
 """
 
 
