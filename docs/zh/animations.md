@@ -4,9 +4,9 @@ PPT Master 导出的 PPTX 同时支持**页间转场**（page transition）与**
 
 ## 默认行为
 
-| 层级 | 默认 | 原因 |
-|---|---|---|
-| 页间转场 | `fade`，0.4 秒 | 适合大多数 deck 的中性基线 |
+| 层级         | 默认               | 原因                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------ | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 页间转场     | `fade`，0.4 秒     | 适合大多数 deck 的中性基线                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | 页内元素动画 | **`none`（关闭）** | 翻到一页时整页一次性呈现。元素一个个自动级联出来是「AI 味」最重的信号，且没人主动要，所以页内动画改为按需开启。用 `-a auto`（或其它效果）开启：根据每个 group 的 SVG id 映射效果（chart→wipe、card-/step-/pillar-→fly、title/takeaway→fade），图片类 id（`hero` / `figure-` / `image` / `img-` / `kpi`）在更丰富的视觉池（zoom / dissolve / circle / box / diamond / wheel）中循环以产生 deck 内变化，未命中的 id 在 fade/wipe/fly/zoom 间循环 |
 
 修改设置只需对同一份 `svg_output/`（或 `svg_final/`）重跑 `svg_to_pptx.py`，无需重新跑 LLM。如要为整份 deck 开启页内动画，加 `-a auto`。
@@ -147,17 +147,17 @@ python3 skills/ppt-master/scripts/svg_to_pptx.py <project> --animation-trigger w
 
 ## 常用速查
 
-| 目标 | 命令 |
-|---|---|
-| 关闭转场 | `-t none` |
-| 切换转场效果 | `-t push`（或上文列表中任一） |
-| 转场放慢 | `--transition-duration 0.8` |
-| 自动播放 | `--auto-advance 5` |
-| 关闭页内动画 | `-a none` |
-| 改为单击触发 | `--animation-trigger on-click` |
-| 切换为单一效果 | `--animation fade` |
-| 所有组同时入场 | `--animation-trigger with-previous` |
-| 元素入场放慢 | `--animation-duration 0.5` |
-| after-previous 拉大间隔 | `--animation-stagger 0.8` |
+| 目标                    | 命令                                |
+| ----------------------- | ----------------------------------- |
+| 关闭转场                | `-t none`                           |
+| 切换转场效果            | `-t push`（或上文列表中任一）       |
+| 转场放慢                | `--transition-duration 0.8`         |
+| 自动播放                | `--auto-advance 5`                  |
+| 关闭页内动画            | `-a none`                           |
+| 改为单击触发            | `--animation-trigger on-click`      |
+| 切换为单一效果          | `--animation fade`                  |
+| 所有组同时入场          | `--animation-trigger with-previous` |
+| 元素入场放慢            | `--animation-duration 0.5`          |
+| after-previous 拉大间隔 | `--animation-stagger 0.8`           |
 
 完整 `svg_to_pptx.py` 参考：[`scripts/docs/svg-pipeline.md`](../../skills/ppt-master/scripts/docs/svg-pipeline.md)。
