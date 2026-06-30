@@ -1546,13 +1546,36 @@ function connectWebSocket(jobId) {
 
   ws.onclose = () => {
     appendLog('[WebSocket closed]\n', 'log-agent');
-    // If job is still running, try to reconnect after 2s
+    // If job is still running, poll server status before attempting reconnect
+    // to avoid an infinite reconnect loop when the job finished while the WS was down.
     if (state.status === 'running' || state.status === 'queued') {
       setTimeout(() => {
-        if (state.jobId && (state.status === 'running' || state.status === 'queued')) {
-          appendLog('[Reconnecting…]\n', 'log-agent');
-          connectWebSocket(state.jobId);
-        }
+        if (!state.jobId || !(state.status === 'running' || state.status === 'queued')) return;
+        fetch(`/jobs/${state.jobId}`)
+          .then(r => r.json())
+          .then(job => {
+            if (job.status === 'running' || job.status === 'queued' || job.status === 'confirm_pending') {
+              appendLog('[Reconnecting…]\n', 'log-agent');
+              connectWebSocket(state.jobId);
+            } else {
+              // Job reached a terminal state while WS was disconnected
+              setStatus(job.status === 'done' ? 'done' : 'error');
+              resetGenerateBtn();
+              if (job.download_url) {
+                showDownloadBar(job.download_url, job.filename || 'presentation.pptx');
+              }
+              libraryLoaded = false;
+              localStorage.removeItem('pptmaster_active_job');
+              appendLog(`\n[Job finished with status: ${job.status}]\n`, job.status === 'done' ? 'log-success' : 'log-error');
+            }
+          })
+          .catch(() => {
+            // Cannot reach server — stop reconnecting and re-enable the button
+            setStatus('error');
+            resetGenerateBtn();
+            localStorage.removeItem('pptmaster_active_job');
+            appendLog('[Cannot reach server — stopped reconnecting]\n', 'log-error');
+          });
       }, 2000);
     }
   };
@@ -2231,13 +2254,16 @@ if (savedJobId) {
         switchTab('log');
         connectWebSocket(savedJobId);
       } else {
-        // Job is done or errored — clear the stored ID
+        // Job is done or errored — clear the stored ID and ensure button is enabled
         localStorage.removeItem('pptmaster_active_job');
+        resetGenerateBtn();
         loadLibrary();
       }
     })
     .catch(() => {
+      // Cannot reach server or job not found — clear stored ID and ensure button is enabled
       localStorage.removeItem('pptmaster_active_job');
+      resetGenerateBtn();
       loadLibrary();
     });
 } else {
