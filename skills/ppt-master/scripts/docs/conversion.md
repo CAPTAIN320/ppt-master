@@ -174,14 +174,3 @@ block Python's default TLS fingerprint. No extra flags needed. If
 `curl_cffi` is not available, it falls back to plain `requests`.
 
 
-## `rotate_images.py`
-
-Fix image EXIF orientation in downloaded or imported assets.
-
-```bash
-python3 scripts/rotate_images.py auto projects/xxx_files
-python3 scripts/rotate_images.py gen projects/xxx_files
-python3 scripts/rotate_images.py fix fixes.json
-```
-
-Use this when extracted photos appear sideways after conversion or import.
