@@ -7,7 +7,6 @@ services:
       - "8080:8080"
     volumes:
       - ./projects:/app/projects
-      - ./exports:/app/exports
       - ./data:/app/data
     env_file:
       - .env

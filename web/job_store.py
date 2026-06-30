@@ -28,7 +28,6 @@ from typing import Any, Optional
 
 DB_PATH = Path("/app/data/.job_store.db")
 PROJECTS_DIR = Path("/app/projects")
-EXPORTS_DIR = Path("/app/exports")
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -231,7 +230,6 @@ class JobStore:
                 # /jobs/{job_id}/slides/{n} can fall back to it.
                 synthetic_id = proj_dir.name
 
-                # Find a matching PPTX in exports/ (name contains the project dir name)
                 download_url = f"/jobs/{synthetic_id}/download"
 
                 result.append({

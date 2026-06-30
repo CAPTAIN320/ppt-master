@@ -87,7 +87,7 @@ def _build_user_message(
         f"Follow the full PPT Master pipeline from SKILL.md.\n"
         f"Use the confirm_gate tool at Step 4 (Eight Confirmations).\n"
         f"Use the slide_ready tool after writing each SVG page.\n"
-        f"Export the final PPTX to /app/exports/ when done."
+        f"Run the post-processing steps (finalize_svg.py, svg_to_pptx.py) when done."
     )
 
     return "\n\n".join(parts)
@@ -306,9 +306,9 @@ async def run_job(
                 }
             )
 
-    # ── Find and signal the exported PPTX ────────────────────────────────────
-    # Look for the PPTX in the project's own exports/ subdirectory.
-    # No copy to the global exports/ directory is performed.
+    # ── Signal pipeline completion ────────────────────────────────────────────
+    # The PPTX is generated on demand when the user clicks Download.
+    # No pre-built copy is made; svg_to_pptx.py runs at download time.
     job_meta = store.get_job(job_id)
     project_path_str = job_meta.get("project_path") if job_meta else None
     pptx_files: list[Path] = []

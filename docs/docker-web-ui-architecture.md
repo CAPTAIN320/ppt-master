@@ -32,7 +32,7 @@ Docker Container
   │     WS     /ws/{id}                   Real-time event stream
   │     POST   /jobs/{id}/confirm         Submit Eight Confirmations result
   │     GET    /jobs/{id}/slides/{n}      Serve SVG for slide N (1-based)
-  │     GET    /jobs/{id}/download        Download exported .pptx
+  │     GET    /jobs/{id}/download        On-demand export: runs svg_to_pptx.py, streams .pptx
   │     GET    /debug/test-llm            LLM connectivity smoke test
   │     GET    /static/{path}             Static file serving
   │
@@ -70,9 +70,8 @@ Docker Container
   │     finalize_svg.py, svg_to_pptx.py, …
   │
   └── Volume Mounts
-        /app/projects/          ← generated project files
+        /app/projects/          ← generated project files (PPTX lives here too)
         /app/projects/uploads/  ← uploaded source files (per job_id subdirectory)
-        /app/exports/           ← exported .pptx files
         /app/data/              ← SQLite job store (isolated from project files)
 
 External APIs (configured via .env)
@@ -98,8 +97,7 @@ ppt-master/
 │   └── static/
 │       └── index.html     Single-file SPA (dark/light theme, 3 tabs)
 ├── skills/ppt-master/     UNCHANGED
-├── projects/              Volume mount (generated project files)
-├── exports/               Volume mount
+├── projects/              Volume mount (generated project files; PPTX exported here)
 └── data/                  Volume mount (SQLite job store)
 ```
 
@@ -140,7 +138,7 @@ Serves the Nth SVG file (1-based, sorted alphabetically) from the project's `svg
 
 ### `GET /jobs/{job_id}/download`
 
-Streams `/app/exports/{job_id}.pptx`. Falls back to the most recently modified `.pptx` in `/app/exports/` if the job-specific file is not found.
+On-demand PPTX export. Looks up `project_path` from the DB (or falls back to treating `job_id` as a project directory name for orphan entries), then runs `svg_to_pptx.py <project_path>` synchronously via `subprocess.run`. Once the script exits successfully, the most recently modified `.pptx` inside the project directory is streamed as a file download. Returns `404` if the project directory is not found, `500` if the script fails or produces no `.pptx`.
 
 ### `GET /debug/test-llm`
 
@@ -162,7 +160,7 @@ Messages sent **server → browser** over `WS /ws/{job_id}`:
 // SVG slide written and ready for preview
 {"type": "slide_ready", "slide": 3, "url": "/jobs/abc/slides/3", "svg_path": "/app/projects/..."}
 
-// Pipeline complete
+// Pipeline complete — download_url points to the on-demand export endpoint
 {"type": "job_done", "download_url": "/jobs/abc/download", "filename": "deck.pptx"}
 
 // Unrecoverable error
@@ -199,9 +197,8 @@ run_job()
             → append tool result to messages as role="tool"
 
   After loop:
-    Find newest .pptx in /app/exports/
-    Copy to /app/exports/{job_id}.pptx
-    push job_done event
+    push job_done event with download_url = /jobs/{job_id}/download
+    (PPTX is generated on demand when the user clicks Download)
 ```
 
 The system prompt is intentionally short and neutral to avoid proxy content filters. The full SKILL.md workflow is injected as part of the initial user message so the agent has complete pipeline instructions without triggering filter heuristics on the system role.
@@ -352,14 +349,15 @@ Dark by default; toggleable to light via a header button. Preference persisted i
 
 ## File Storage
 
-| Path                              | Contents                                                 |
-| --------------------------------- | -------------------------------------------------------- |
-| `/app/projects/`                  | Generated project directories (one per job)              |
-| `/app/projects/uploads/{job_id}/` | Source files uploaded by the user for that job           |
-| `/app/exports/`                   | Exported `.pptx` files; named `{job_id}.pptx` after copy |
-| `/app/data/.job_store.db`         | SQLite job state database                                |
+| Path                              | Contents                                                              |
+| --------------------------------- | --------------------------------------------------------------------- |
+| `/app/projects/`                  | Generated project directories (one per job); PPTX exported here too  |
+| `/app/projects/uploads/{job_id}/` | Source files uploaded by the user for that job                        |
+| `/app/data/.job_store.db`         | SQLite job state database                                             |
 
-`/app/projects/`, `/app/exports/`, and `/app/data/` are all bind-mounted from the host via `docker-compose.yml` so data persists across container restarts. The DB is kept in a separate `/app/data/` volume so that wiping `./projects/` on the host does not destroy job history, and so the volume mount order cannot shadow the database file before `_init_db()` runs.
+`/app/projects/` and `/app/data/` are bind-mounted from the host via `docker-compose.yml` so data persists across container restarts. The DB is kept in a separate `/app/data/` volume so that wiping `./projects/` on the host does not destroy job history, and so the volume mount order cannot shadow the database file before `_init_db()` runs.
+
+There is no global `/app/exports/` directory. The `.pptx` file produced by `svg_to_pptx.py` lives inside the project directory (typically `<project_path>/exports/<name>.pptx`) and is served on demand when the user clicks **Download PPTX**.
 
 ---
 
@@ -458,8 +456,8 @@ uvicorn web.server:app --host 0.0.0.0 --port 8080 --log-level info
 6. At Step 4 (Eight Confirmations), agent calls `confirm_gate` → server sends `confirm_required` event → browser switches to Confirm tab → user reviews/edits fields → clicks **Confirm & Continue** → `POST /jobs/{id}/confirm` → `asyncio.Event` unblocks agent.
 7. Agent writes SVG pages via `write_file`; after each page calls `slide_ready` → `slide_ready` event → browser adds thumbnail to Slides tab.
 8. Agent calls `run_script(finalize_svg.py)` then `run_script(svg_to_pptx.py)`.
-9. Agent loop ends (no more tool calls); runner finds the newest `.pptx` in `/app/exports/`, copies it to `/app/exports/{job_id}.pptx`, pushes `job_done` event.
-10. Browser shows the download bar; user clicks **Download PPTX** → `GET /jobs/{id}/download` → file streamed.
+9. Agent loop ends (no more tool calls); runner pushes `job_done` event with `download_url = /jobs/{job_id}/download`.
+10. Browser shows the download bar; user clicks **Download PPTX** → `GET /jobs/{id}/download` → server runs `svg_to_pptx.py` on demand, finds the `.pptx` inside the project directory, streams it.
 
 ---
 
