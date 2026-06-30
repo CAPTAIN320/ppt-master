@@ -87,10 +87,10 @@ python -c "import pptx; import fitz; print('All core dependencies OK')"
 
 装好 Python 和 `requirements.txt` 后，生成 PPT 的全部功能已经就绪。下面是**边缘场景的备用方案和增强项**——只有遇到对应的具体场景才需要装。
 
-| 增强项 | 只在以下情况才装 | 安装方式 | 验证 |
-|--------|-----------------|---------|------|
-| **CairoSVG** — 更高质量 PNG 后备图 | 你希望在不原生支持 SVG 的 Office 版本下获得更清晰的 PNG 后备图。`svglib`（已默认安装）足够大多数场景。 | 安装 [GTK3 Runtime](https://github.com/nickvdp/gtk3/releases) 后 `pip install cairosvg` | `python -c "import cairosvg"` |
-| **Pandoc** — 旧格式文档 | 你需要转 `.doc`、`.odt`、`.rtf`、`.tex`、`.rst`、`.org`、`.typ`。`.docx`/`.html`/`.epub`/`.ipynb` 已由 Python 原生处理。 | [pandoc.org](https://pandoc.org/installing.html) 下载 `.msi` 安装 | `pandoc --version` |
+| 增强项                             | 只在以下情况才装                                                                                                         | 安装方式                                                                                | 验证                          |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- | ----------------------------- |
+| **CairoSVG** — 更高质量 PNG 后备图 | 你希望在不原生支持 SVG 的 Office 版本下获得更清晰的 PNG 后备图。`svglib`（已默认安装）足够大多数场景。                   | 安装 [GTK3 Runtime](https://github.com/nickvdp/gtk3/releases) 后 `pip install cairosvg` | `python -c "import cairosvg"` |
+| **Pandoc** — 旧格式文档            | 你需要转 `.doc`、`.odt`、`.rtf`、`.tex`、`.rst`、`.org`、`.typ`。`.docx`/`.html`/`.epub`/`.ipynb` 已由 Python 原生处理。 | [pandoc.org](https://pandoc.org/installing.html) 下载 `.msi` 安装                       | `pandoc --version`            |
 
 ---
 
@@ -103,6 +103,7 @@ python -c "import pptx; import fitz; print('All core dependencies OK')"
 **方法 1** — 重新运行 Python 安装程序，选择 **Modify**，确保勾选 **"Add Python to environment variables"**。
 
 **方法 2** — 手动添加 PATH：
+
 1. 先在 PowerShell 中运行 `where python`，记下输出的路径（如 `C:\Users\你的用户名\AppData\Local\Programs\Python\Python312\python.exe`）
 2. 开始菜单搜索「环境变量」
 3. 找到 `Path` → **编辑** → 新增上面路径的**目录部分**及其 `Scripts` 子目录：
