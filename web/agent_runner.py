@@ -124,6 +124,7 @@ async def run_job(
     uploaded_files: list[dict],
     store: JobStore,
     theme: str = "none",
+    auto_confirm: bool = False,
 ) -> None:
     """
     Main agent loop. Runs as an asyncio task.
@@ -154,6 +155,7 @@ async def run_job(
     await store.append_log(job_id, f"[Agent] Model: {model}\n")
     await store.append_log(job_id, f"[Agent] Canvas: {canvas_format}\n")
     await store.append_log(job_id, f"[Agent] Theme: {theme}\n")
+    await store.append_log(job_id, f"[Agent] Auto-confirm: {auto_confirm}\n")
     await store.append_log(job_id, f"[Agent] Base URL: {agent_base_url}\n")
     await store.append_log(job_id, f"[Agent] API key prefix: {agent_api_key[:12]}...\n\n")
 
@@ -316,7 +318,7 @@ async def run_job(
             await store.append_log(job_id, f"\n[Tool] {tool_name}({json.dumps(tool_args)[:200]})\n")
 
             try:
-                result = await dispatch_tool(tool_name, tool_args, job_id, store)
+                result = await dispatch_tool(tool_name, tool_args, job_id, store, auto_confirm=auto_confirm)
             except Exception as exc:
                 result = {"error": f"Tool execution failed: {exc}"}
 

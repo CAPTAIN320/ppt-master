@@ -153,6 +153,7 @@ async def dispatch_tool(
     args: dict[str, Any],
     job_id: str,
     store: Any,  # JobStore — avoid circular import
+    auto_confirm: bool = False,
 ) -> Any:
     """Execute a tool call and return a JSON-serialisable result."""
 
@@ -222,18 +223,21 @@ async def dispatch_tool(
 
     elif name == "confirm_gate":
         recommendations = args.get("recommendations", {})
-        store.set_confirm_pending(job_id, recommendations)
-        await store.push_event(
-            job_id,
-            {
-                "type": "confirm_required",
-                "data": recommendations,
-            },
-        )
-        await store.wait_for_confirm(job_id)
-        result = store.get_confirm_result(job_id)
-        await store.append_log(job_id, f"\n[Confirm gate passed] User choices: {json.dumps(result)}\n")
-        return {"confirmed": True, "user_choices": result}
+        if auto_confirm:
+            # Auto-confirm: use the agent's own recommendations as the confirmed result.
+            # This bypasses the browser confirmation UI and lets the pipeline proceed immediately.
+            store.submit_confirm(job_id, recommendations)
+            await store.append_log(job_id, "\n[Confirm gate] Auto-confirmed with agent recommendations.\n")
+            return {"confirmed": True, "user_choices": recommendations}
+        else:
+            # Blocking confirmation: push event to the browser UI and wait for the user.
+            await store.push_event(job_id, {"type": "confirm_required", "data": recommendations})
+            store.set_status(job_id, "confirm_pending")
+            await store.wait_for_confirm(job_id)
+            user_choices = store.get_confirm_result(job_id)
+            store.set_status(job_id, "running")
+            await store.append_log(job_id, "\n[Confirm gate] User confirmation received.\n")
+            return {"confirmed": True, "user_choices": user_choices}
 
     elif name == "slide_ready":
         slide_num = args["slide_number"]
