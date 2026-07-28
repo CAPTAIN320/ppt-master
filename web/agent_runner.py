@@ -24,6 +24,23 @@ from .tools import TOOL_DEFINITIONS, dispatch_tool
 
 REPO_ROOT = Path("/app")
 
+_THEMES: dict[str, str] = {
+    "rakuten-crimson": (
+        "Brand theme: Rakuten Crimson\n"
+        "- Primary: #BF0000 (crimson red)\n"
+        "- Background: #FFFFFF (white)\n"
+        "- Accent: #000000 (black)\n"
+        "Lock this palette in §III Visual Theme and §V Layout. Do not deviate."
+    ),
+    "rakuten-mobile": (
+        "Brand theme: Rakuten Mobile\n"
+        "- Primary: #FF008C (Rakuten pink)\n"
+        "- Background: #FFFFFF (white)\n"
+        "- Accent: #777B7E (gray)\n"
+        "Lock this palette in §III Visual Theme and §V Layout. Do not deviate."
+    ),
+}
+
 
 def _strip_thinking_content_blocks(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
@@ -46,14 +63,7 @@ def _strip_thinking_content_blocks(messages: list[dict[str, Any]]) -> list[dict[
 
         # ── Strip thinking/thought content blocks ─────────────────────────
         if isinstance(msg.get("content"), list):
-            msg["content"] = [
-                block
-                for block in msg["content"]
-                if not (
-                    isinstance(block, dict)
-                    and block.get("type") in ("thinking", "thought")
-                )
-            ]
+            msg["content"] = [block for block in msg["content"] if not (isinstance(block, dict) and block.get("type") in ("thinking", "thought"))]
             # If all blocks were thinking blocks, collapse to None so the
             # message stays valid (assistant with only tool_calls).
             if not msg["content"]:
@@ -73,6 +83,7 @@ def _build_user_message(
     canvas_format: str,
     model: str,
     uploaded_files: list[dict],
+    theme: str = "none",
 ) -> str:
     """Build the initial user message for the agent."""
     parts = []
@@ -91,6 +102,9 @@ def _build_user_message(
         f"PPTX export is handled on demand by the server when the user clicks Download."
     )
 
+    if theme != "none" and theme in _THEMES:
+        parts.append(_THEMES[theme])
+
     return "\n\n".join(parts)
 
 
@@ -101,6 +115,7 @@ async def run_job(
     model: str,
     uploaded_files: list[dict],
     store: JobStore,
+    theme: str = "none",
 ) -> None:
     """
     Main agent loop. Runs as an asyncio task.
@@ -118,7 +133,7 @@ async def run_job(
     )
 
     system_prompt = get_system_prompt()
-    user_message = _build_user_message(topic, canvas_format, model, uploaded_files)
+    user_message = _build_user_message(topic, canvas_format, model, uploaded_files, theme)
 
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": get_skill_md()},
@@ -130,6 +145,7 @@ async def run_job(
     await store.append_log(job_id, f"[Agent] Starting job: {topic}\n")
     await store.append_log(job_id, f"[Agent] Model: {model}\n")
     await store.append_log(job_id, f"[Agent] Canvas: {canvas_format}\n")
+    await store.append_log(job_id, f"[Agent] Theme: {theme}\n")
     await store.append_log(job_id, f"[Agent] Base URL: {agent_base_url}\n")
     await store.append_log(job_id, f"[Agent] API key prefix: {agent_api_key[:12]}...\n\n")
 
@@ -159,8 +175,7 @@ async def run_job(
         try:
             await store.append_log(
                 job_id,
-                f"[Agent] Calling {model} at {agent_base_url} with {len(messages)} messages"
-                f" ({'non-streaming' if use_non_streaming else 'streaming'})\n",
+                f"[Agent] Calling {model} at {agent_base_url} with {len(messages)} messages" f" ({'non-streaming' if use_non_streaming else 'streaming'})\n",
             )
 
             if use_non_streaming:

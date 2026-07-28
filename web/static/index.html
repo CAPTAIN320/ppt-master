@@ -1166,6 +1166,15 @@
         </div>
 
         <div class="form-group">
+          <label for="theme-select">Brand Theme</label>
+          <select id="theme-select">
+            <option value="none" selected>No Theme</option>
+            <option value="rakuten-crimson">Rakuten Crimson</option>
+            <option value="rakuten-mobile">Rakuten Mobile</option>
+          </select>
+        </div>
+
+        <div class="form-group">
           <label for="model-select">AI Model</label>
           <select id="model-select">
             <option value="claude-sonnet-4.6" selected>claude-sonnet-4.6 (recommended)</option>
@@ -1521,6 +1530,7 @@ async function startJob() {
   formData.append('topic', topic);
   formData.append('canvas_format', document.getElementById('canvas-select').value);
   formData.append('model', document.getElementById('model-select').value);
+  formData.append('theme', document.getElementById('theme-select').value);
   state.selectedFiles.forEach(f => formData.append('files', f));
 
   try {

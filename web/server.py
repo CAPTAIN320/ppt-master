@@ -84,6 +84,7 @@ async def create_job(
     canvas_format: str = Form(default="ppt169"),
     model: str = Form(default="claude-sonnet-4.6"),
     files: list[UploadFile] = File(default=[]),
+    theme: str = Form(default="none"),
 ):
     """Create a new PPT generation job."""
     job_id = store.create_job(topic=topic)
@@ -114,6 +115,7 @@ async def create_job(
             model=model,
             uploaded_files=uploaded_files,
             store=store,
+            theme=theme,
         )
     )
 
@@ -147,7 +149,7 @@ async def delete_job(job_id: str):
         proj_dir = Path(project_path)
         # Remap Docker-internal /app/projects/... to the actual mount point when
         # running outside Docker (e.g. tests on host).
-        if not proj_dir.exists() and proj_dir.parts[:3] == ('/', 'app', 'projects'):
+        if not proj_dir.exists() and proj_dir.parts[:3] == ("/", "app", "projects"):
             proj_dir = REPO_ROOT / "projects" / proj_dir.name
         if proj_dir.exists():
             shutil.rmtree(proj_dir, ignore_errors=True)
@@ -183,18 +185,20 @@ async def get_job(job_id: str):
     slide_count = len(list(svg_dir.glob("*.svg"))) if svg_dir.is_dir() else 0
 
     name = proj_dir.name
-    name = re.sub(r'^ppt\d+_', '', name)
+    name = re.sub(r"^ppt\d+_", "", name)
     topic = name.replace("_", " ")
 
-    return JSONResponse({
-        "id": job_id,
-        "status": "done",
-        "topic": topic,
-        "project_path": str(proj_dir),
-        "slide_count": slide_count,
-        "download_url": f"/jobs/{job_id}/download",
-        "synthetic": True,
-    })
+    return JSONResponse(
+        {
+            "id": job_id,
+            "status": "done",
+            "topic": topic,
+            "project_path": str(proj_dir),
+            "slide_count": slide_count,
+            "download_url": f"/jobs/{job_id}/download",
+            "synthetic": True,
+        }
+    )
 
 
 # ── WebSocket log stream ──────────────────────────────────────────────────────
@@ -283,7 +287,7 @@ def _inline_svg_images(svg_text: str, svg_dir: Path) -> str:
         ext = resolved.suffix.lower()
         mime = _MIME_BY_EXT.get(ext) or (mimetypes.guess_type(str(resolved))[0] or "application/octet-stream")
         encoded = base64.b64encode(resolved.read_bytes()).decode("ascii")
-        return f'{prefix}data:{mime};base64,{encoded}{suffix}'
+        return f"{prefix}data:{mime};base64,{encoded}{suffix}"
 
     return _HREF_RE.sub(_replace, svg_text)
 
@@ -448,7 +452,7 @@ def _resolve_proj_dir(job_id: str) -> Path:
         proj_dir = Path(project_path_str)
         # Remap Docker-internal /app/projects/... to the actual mount point when
         # running outside Docker (e.g. tests on host).
-        if not proj_dir.exists() and proj_dir.parts[:3] == ('/', 'app', 'projects'):
+        if not proj_dir.exists() and proj_dir.parts[:3] == ("/", "app", "projects"):
             proj_dir = REPO_ROOT / "projects" / proj_dir.name
     else:
         # Fallback 1: orphan project directory
