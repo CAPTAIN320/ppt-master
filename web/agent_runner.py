@@ -29,15 +29,23 @@ _THEMES: dict[str, str] = {
         "Brand theme: Rakuten Crimson\n"
         "- Primary: #BF0000 (crimson red)\n"
         "- Background: #FFFFFF (white)\n"
-        "- Accent: #000000 (black)\n"
-        "Lock this palette in §III Visual Theme and §V Layout. Do not deviate."
+        "- Accent: #777B7E (gray)\n"
+        "Lock this palette in §III Visual Theme and §V Layout. Do not deviate.\n"
+        "On every slide, add a footer bar at the bottom of the canvas:\n"
+        '- Bottom-left Rakuten wordmark: <text x="40" y="[canvas_height - 28]" font-size="14" font-weight="bold" fill="#BF0000" font-family="sans-serif">Rakuten</text>\n'
+        '- Bottom-right confidential label: <text x="[canvas_width - 40]" y="[canvas_height - 28]" font-size="10" fill="#000000" text-anchor="end" font-family="sans-serif">Confidential</text>\n'
+        "Replace [canvas_height] and [canvas_width] with the actual SVG canvas dimensions for each slide."
     ),
     "rakuten-mobile": (
         "Brand theme: Rakuten Mobile\n"
         "- Primary: #FF008C (Rakuten pink)\n"
         "- Background: #FFFFFF (white)\n"
         "- Accent: #777B7E (gray)\n"
-        "Lock this palette in §III Visual Theme and §V Layout. Do not deviate."
+        "Lock this palette in §III Visual Theme and §V Layout. Do not deviate.\n"
+        "On every slide, add a footer bar at the bottom of the canvas:\n"
+        '- Bottom-left Rakuten wordmark: <text x="40" y="[canvas_height - 28]" font-size="14" font-weight="bold" fill="#FF008C" font-family="sans-serif">Rakuten</text>\n'
+        '- Bottom-right confidential label: <text x="[canvas_width - 40]" y="[canvas_height - 28]" font-size="10" fill="#000000" text-anchor="end" font-family="sans-serif">Confidential</text>\n'
+        "Replace [canvas_height] and [canvas_width] with the actual SVG canvas dimensions for each slide."
     ),
 }
 
