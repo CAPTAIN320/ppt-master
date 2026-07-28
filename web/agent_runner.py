@@ -43,7 +43,7 @@ _THEMES: dict[str, str] = {
         "- Accent: #777B7E (gray)\n"
         "Lock this palette in §III Visual Theme and §V Layout. Do not deviate.\n"
         "On every slide, add a footer bar at the bottom of the canvas:\n"
-        '- Bottom-left Rakuten wordmark: <text x="40" y="[canvas_height - 28]" font-size="14" font-weight="bold" fill="#FF008C" font-family="sans-serif">Rakuten</text>\n'
+        '- Bottom-left Rakuten wordmark: <text x="40" y="[canvas_height - 28]" font-size="14" font-weight="bold" fill="#FF008C" font-family="sans-serif">Rakuten Mobile</text>\n'
         '- Bottom-right confidential label: <text x="[canvas_width - 40]" y="[canvas_height - 28]" font-size="10" fill="#000000" text-anchor="end" font-family="sans-serif">Confidential</text>\n'
         "Replace [canvas_height] and [canvas_width] with the actual SVG canvas dimensions for each slide."
     ),
