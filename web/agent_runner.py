@@ -31,6 +31,12 @@ _THEMES: dict[str, str] = {
         "- Background: #FFFFFF (white)\n"
         "- Accent: #777B7E (gray)\n"
         "Lock this palette in §III Visual Theme and §V Layout. Do not deviate.\n"
+        "Background MUST be white (#FFFFFF) on all slides. "
+        "Do NOT select any dark-background visual style "
+        "(dark-tech, blueprint, dark-cinematic, chalkboard, ink-wash, pixel-art, "
+        "or any style with a dark/black canvas). "
+        "Choose only light-background styles (swiss-minimal, soft-rounded, editorial, "
+        "glassmorphism, photo-editorial, or similar).\n"
         "On every slide, add a footer bar at the bottom of the canvas:\n"
         '- Bottom-left Rakuten wordmark: <text x="40" y="[canvas_height - 28]" font-size="14" font-weight="bold" fill="#BF0000" font-family="sans-serif">Rakuten</text>\n'
         '- Bottom-right confidential label: <text x="[canvas_width - 40]" y="[canvas_height - 28]" font-size="10" fill="#777B7E" text-anchor="end" font-family="sans-serif">Confidential</text>\n'
@@ -42,6 +48,12 @@ _THEMES: dict[str, str] = {
         "- Background: #FFFFFF (white)\n"
         "- Accent: #777B7E (gray)\n"
         "Lock this palette in §III Visual Theme and §V Layout. Do not deviate.\n"
+        "Background MUST be white (#FFFFFF) on all slides. "
+        "Do NOT select any dark-background visual style "
+        "(dark-tech, blueprint, dark-cinematic, chalkboard, ink-wash, pixel-art, "
+        "or any style with a dark/black canvas). "
+        "Choose only light-background styles (swiss-minimal, soft-rounded, editorial, "
+        "glassmorphism, photo-editorial, or similar).\n"
         "On every slide, add a footer bar at the bottom of the canvas:\n"
         '- Bottom-left Rakuten wordmark: <text x="40" y="[canvas_height - 28]" font-size="14" font-weight="bold" fill="#FF008C" font-family="sans-serif">Rakuten Mobile</text>\n'
         '- Bottom-right confidential label: <text x="[canvas_width - 40]" y="[canvas_height - 28]" font-size="10" fill="#777B7E" text-anchor="end" font-family="sans-serif">Confidential</text>\n'
