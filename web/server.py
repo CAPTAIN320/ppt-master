@@ -82,7 +82,7 @@ async def list_examples():
 async def create_job(
     topic: str = Form(...),
     canvas_format: str = Form(default="ppt169"),
-    model: str = Form(default="claude-sonnet-4.6"),
+    model: str = Form(default="claude-sonnet-5"),
     files: list[UploadFile] = File(default=[]),
     theme: str = Form(default="none"),
     auto_confirm: str = Form(default="false"),
@@ -350,7 +350,7 @@ async def debug_test_llm():
         api_key=os.environ.get("OPENAI_API_KEY", ""),
         base_url=os.environ.get("AGENT_BASE_URL", os.environ.get("OPENAI_BASE_URL", "")),
     )
-    model = os.environ.get("AGENT_MODEL", "claude-sonnet-4.6")
+    model = os.environ.get("AGENT_MODEL", "claude-sonnet-5")
 
     results = {}
 

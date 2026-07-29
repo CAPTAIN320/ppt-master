@@ -113,7 +113,7 @@ Creates a new generation job. Accepts `multipart/form-data`:
 | --------------- | --------------- | ------------------- | -------------------------------------------- |
 | `topic`         | `string` (form) | required            | Presentation topic / description             |
 | `canvas_format` | `string` (form) | `ppt169`            | Canvas format (`ppt169`, `ppt43`, `ppt1610`) |
-| `model`         | `string` (form) | `claude-sonnet-4.6` | LLM model name                               |
+| `model`         | `string` (form) | `claude-sonnet-5` | LLM model name                               |
 | `files`         | `UploadFile[]`  | `[]`                | Optional source files                        |
 
 Uploaded files are saved to `/app/projects/uploads/{job_id}/{filename}`.
@@ -369,7 +369,7 @@ All passed via `.env` / `docker-compose.yml`:
 | ------------------ | --------------------------------------------------------------------- |
 | `AGENT_API_KEY`    | API key for the agent LLM endpoint (falls back to `OPENAI_API_KEY`)   |
 | `AGENT_BASE_URL`   | Base URL for the agent LLM endpoint (falls back to `OPENAI_BASE_URL`) |
-| `AGENT_MODEL`      | Model name for the agent (default: `claude-sonnet-4.6`)               |
+| `AGENT_MODEL`      | Model name for the agent (default: `claude-sonnet-5`)               |
 | `OPENAI_API_KEY`   | API key for image generation (and agent fallback)                     |
 | `OPENAI_BASE_URL`  | Base URL for image generation (and agent fallback)                    |
 | `IMAGE_BACKEND`    | Image generation backend (default: `openai`)                          |
