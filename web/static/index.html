@@ -675,12 +675,13 @@
        slide_ready events for the actively-generating job. Hidden while idle;
        shown by addLiveSlideThumb() once the first slide of a run arrives. */
     #log-live-slides-section {
-      flex-shrink: 0;
-      height: 240px;
+      flex: 7;
+      min-height: 0;
       padding: 16px clamp(24px, 4vw, 64px) 14px;
       border-bottom: 1px solid var(--border);
       background: var(--header-bg);
       flex-direction: column;
+      overflow: hidden;
     }
 
     #log-live-slides-empty {
@@ -694,13 +695,14 @@
 
     #log-live-slides-layout {
       flex: 1;
+      min-height: 0;
       overflow: hidden;
-      gap: 12px;
-      margin-top: 10px;
+      gap: 16px;
+      margin-top: 14px;
     }
 
     #log-live-strip {
-      width: 140px;
+      width: 180px;
       flex-shrink: 0;
       overflow-y: auto;
       overflow-x: hidden;
@@ -719,7 +721,7 @@
       border: 1px solid var(--border);
       border-radius: 14px;
       overflow: hidden;
-      padding: 10px;
+      padding: 16px;
     }
 
     #log-live-viewer-img {
@@ -791,7 +793,8 @@
        now wrapped so it can share vertical space with the live-slide panel
        above it. Internal scroll behavior is unchanged. */
     #log-text-section {
-      flex: 1;
+      flex: 3;
+      min-height: 0;
       overflow-y: auto;
       padding: 28px clamp(24px, 4vw, 64px);
     }
