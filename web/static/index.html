@@ -2316,6 +2316,12 @@ function appendLog(text, cssClass) {
   // Auto-scroll
   const container = document.getElementById('log-container');
   container.scrollTop = container.scrollHeight;
+
+  // Auto-scroll the log text body (the actual scrolling container for
+  // #log-output since the collapse-toggle split, #log-text-section itself
+  // no longer scrolls) so newly streamed lines stay in view.
+  const body = document.getElementById('log-text-body');
+  if (body) body.scrollTop = body.scrollHeight;
 }
 
 function detectLogClass(text) {
@@ -3127,6 +3133,20 @@ if (savedJobId) {
         document.getElementById('generate-btn-icon').textContent = '⏳';
         document.getElementById('generate-btn-text').textContent = 'Running…';
         switchTab('log');
+        // Backfill the live-slides panel (Log tab) with slides that were
+        // already generated before this refresh — the WebSocket reconnect
+        // below only re-subscribes going forward and does not replay past
+        // slide_ready events, only log text (see server.py's log replay).
+        // Mirrors loadJobSlides()'s slide_count probing, but targets the
+        // live-slides panel via addLiveSlideThumb() instead of the Slides
+        // tab, so the 70/30 split and collapse toggle re-establish
+        // immediately. addLiveSlideThumb() dedupes by slide number, so any
+        // slide_ready event that races in via the WebSocket for a slide
+        // already backfilled here is safely ignored.
+        const slideCount = job.slide_count || 0;
+        for (let i = 1; i <= slideCount; i++) {
+          addLiveSlideThumb(i, `/jobs/${savedJobId}/slides/${i}`);
+        }
         connectWebSocket(savedJobId);
       } else {
         // Job is done or errored — clear the stored ID and ensure button is enabled
