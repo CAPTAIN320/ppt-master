@@ -105,6 +105,7 @@ def _build_user_message(
     uploaded_files: list[dict],
     theme: str = "none",
     slide_count_pref: str = "",
+    image_usage_pref: str = "",
 ) -> str:
     """Build the initial user message for the agent."""
     parts = []
@@ -136,6 +137,22 @@ def _build_user_message(
             f"sound content planning — surface the tension to the user via the confirm_gate recommendation instead."
         )
 
+    if image_usage_pref:
+        _image_usage_labels = {
+            "ai": "AI-generated images",
+            "provided": "the user's own uploaded files only (no AI generation, no web sourcing)",
+            "web": "web-sourced images",
+            "none": "no images at all",
+        }
+        _label = _image_usage_labels.get(image_usage_pref, image_usage_pref)
+        parts.append(
+            f"User's image usage preference: {_label}. "
+            f"Set `recommend.image_usage` (and, if the Eight Confirmations page is shown, the confirm_gate recommendation) "
+            f"to honor this at Step 4. IMPORTANT: if auto-approve is active, your own `recommendations` dict passed to the "
+            f"confirm_gate tool becomes the final confirmed value with no human review — make sure `image_usage` in that "
+            f"dict matches this preference exactly (map to the pipeline's image_usage ids: 'ai', 'provided', 'web', or 'none')."
+        )
+
     return "\n\n".join(parts)
 
 
@@ -148,6 +165,7 @@ async def run_job(
     store: JobStore,
     theme: str = "none",
     slide_count_pref: str = "",
+    image_usage_pref: str = "",
     auto_confirm: bool = False,
 ) -> None:
     """
@@ -166,7 +184,7 @@ async def run_job(
     )
 
     system_prompt = get_system_prompt()
-    user_message = _build_user_message(topic, canvas_format, model, uploaded_files, theme, slide_count_pref)
+    user_message = _build_user_message(topic, canvas_format, model, uploaded_files, theme, slide_count_pref, image_usage_pref)
 
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": get_skill_md()},
