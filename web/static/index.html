@@ -795,8 +795,59 @@
     #log-text-section {
       flex: 3;
       min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      padding: 20px clamp(24px, 4vw, 64px) 28px;
+    }
+
+    /* Collapse/expand toggle for the log text panel — mirrors the
+       #sidebar-toggle treatment (small circular icon button). */
+    #log-collapse-toggle {
+      align-self: flex-end;
+      width: 26px;
+      height: 26px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-raised);
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 11px;
+      color: var(--text-muted);
+      transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, transform 0.2s ease;
+      flex-shrink: 0;
+      line-height: 1;
+      user-select: none;
+      margin-bottom: 10px;
+    }
+
+    #log-collapse-toggle:hover {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+      color: var(--accent);
+      transform: translateY(-1px);
+    }
+
+    #log-text-body {
+      flex: 1;
+      min-height: 0;
       overflow-y: auto;
-      padding: 28px clamp(24px, 4vw, 64px);
+    }
+
+    /* Collapsed state: hide the log text body and shrink the section down to
+       just its toggle button. #log-live-slides-section keeps flex: 7 and is
+       the only remaining flex-grow sibling once this section's flex-basis is
+       reduced to content size, so it expands to consume the rest of
+       #log-container. */
+    #log-text-section.log-text-collapsed {
+      flex: 0 0 auto;
+      padding: 10px clamp(24px, 4vw, 64px);
+    }
+
+    #log-text-section.log-text-collapsed #log-text-body {
+      display: none;
     }
 
     #log-output {
@@ -1781,11 +1832,14 @@
           </div>
         </div>
         <div id="log-text-section">
-          <div class="log-empty" id="log-empty">
-            <div class="log-empty-icon">🤖</div>
-            <div class="log-empty-text">Agent output will appear here once you start a job.</div>
+          <button id="log-collapse-toggle" title="Collapse log" aria-label="Collapse log" onclick="toggleLogCollapse()" style="display:none;">▼</button>
+          <div id="log-text-body">
+            <div class="log-empty" id="log-empty">
+              <div class="log-empty-icon">🤖</div>
+              <div class="log-empty-text">Agent output will appear here once you start a job.</div>
+            </div>
+            <div id="log-output"></div>
           </div>
-          <div id="log-output"></div>
         </div>
       </div>
     </div>
@@ -2504,6 +2558,10 @@ function addLiveSlideThumb(slideNum, url) {
   // First slide of a run: reveal the panel and its layout.
   const section = document.getElementById('log-live-slides-section');
   if (section.style.display === 'none') section.style.display = 'flex';
+  // Collapsing the log section only makes sense when there's a live-slides
+  // panel above it to expand into, so the toggle tracks this section's
+  // visibility.
+  document.getElementById('log-collapse-toggle').style.display = 'flex';
   const empty = document.getElementById('log-live-slides-empty');
   if (empty) empty.style.display = 'none';
   const layout = document.getElementById('log-live-slides-layout');
@@ -2698,6 +2756,16 @@ function resetMonitor() {
   liveBadge.style.display = 'none';
   liveBadge.textContent = '0';
 
+  // Hide the log-collapse toggle along with the live-slides section it
+  // controls space for, and reset any stale collapsed state so a fresh
+  // job always starts with the log section expanded.
+  document.getElementById('log-text-section').classList.remove('log-text-collapsed');
+  const logCollapseBtn = document.getElementById('log-collapse-toggle');
+  logCollapseBtn.style.display = 'none';
+  logCollapseBtn.textContent = '▼';
+  logCollapseBtn.title = 'Collapse log';
+  logCollapseBtn.setAttribute('aria-label', 'Collapse log');
+
   // Hide confirm tab
   document.getElementById('confirm-tab-btn').style.display = 'none';
   document.getElementById('confirm-fields').innerHTML = '';
@@ -2764,6 +2832,20 @@ function initSidebar() {
     btn.textContent = '▶';
     btn.title = 'Expand sidebar';
   }
+}
+
+// ── Log tab: log-text collapse toggle ───────────────────────────────────────
+// Independent of job state — collapsing/expanding #log-text-section simply
+// gives #log-live-slides-section (flex: 7, the only remaining flex-grow
+// sibling) the freed vertical space in #log-container. Does not touch the
+// Slides tab or the live-slides show/hide-on-idle logic.
+function toggleLogCollapse() {
+  const section = document.getElementById('log-text-section');
+  const btn = document.getElementById('log-collapse-toggle');
+  const collapsed = section.classList.toggle('log-text-collapsed');
+  btn.textContent = collapsed ? '▲' : '▼';
+  btn.title = collapsed ? 'Expand log' : 'Collapse log';
+  btn.setAttribute('aria-label', btn.title);
 }
 
 // ── Library ────────────────────────────────────────────────────────────────
