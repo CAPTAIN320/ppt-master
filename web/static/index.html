@@ -1544,8 +1544,20 @@
           </select>
         </div>
 
+        <div class="form-group">
+          <label for="slide-count-select">Target Slide Count</label>
+          <select id="slide-count-select">
+            <option value="">Auto (recommended)</option>
+            <option value="~3">~3 slides</option>
+            <option value="~5-8" selected>~5–8 slides</option>
+            <option value="~10-15">~10–15 slides</option>
+            <option value="~15-20">~15–20 slides</option>
+            <option value="~20+">~20+ slides</option>
+          </select>
+        </div>
+
         <div class="form-group" style="flex-direction:row; align-items:center; gap:8px;">
-          <input type="checkbox" id="auto-approve-checkbox" style="width:auto; margin:0; cursor:pointer;" />
+          <input type="checkbox" id="auto-approve-checkbox" style="width:auto; margin:0; cursor:pointer;" checked />
           <label for="auto-approve-checkbox" style="margin:0; cursor:pointer;">Auto-approve design confirmation</label>
         </div>
 
@@ -1917,6 +1929,8 @@ async function startJob() {
   formData.append('model', document.getElementById('model-select').value);
   formData.append('theme', document.getElementById('theme-select').value);
   formData.append('auto_confirm', document.getElementById('auto-approve-checkbox').checked ? 'true' : 'false');
+  const slideCountPref = document.getElementById('slide-count-select').value;
+  if (slideCountPref) formData.append('slide_count_pref', slideCountPref);
   state.selectedFiles.forEach(f => formData.append('files', f));
 
   try {

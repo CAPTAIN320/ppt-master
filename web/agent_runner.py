@@ -104,6 +104,7 @@ def _build_user_message(
     model: str,
     uploaded_files: list[dict],
     theme: str = "none",
+    slide_count_pref: str = "",
 ) -> str:
     """Build the initial user message for the agent."""
     parts = []
@@ -125,6 +126,16 @@ def _build_user_message(
     if theme != "none" and theme in _THEMES:
         parts.append(_THEMES[theme])
 
+    if slide_count_pref:
+        parts.append(
+            f"User's target slide count preference: {slide_count_pref}. "
+            f"This is a preference only — reconcile it with the source content volume and "
+            f"the confirmed delivery purpose at Step 4 (Eight Confirmations). The Strategist's "
+            f"content-aware recommendation and the user's final choice at the confirm_gate step "
+            f"still govern the actual page count; do not force this count if it conflicts with "
+            f"sound content planning — surface the tension to the user via the confirm_gate recommendation instead."
+        )
+
     return "\n\n".join(parts)
 
 
@@ -136,6 +147,7 @@ async def run_job(
     uploaded_files: list[dict],
     store: JobStore,
     theme: str = "none",
+    slide_count_pref: str = "",
     auto_confirm: bool = False,
 ) -> None:
     """
@@ -154,7 +166,7 @@ async def run_job(
     )
 
     system_prompt = get_system_prompt()
-    user_message = _build_user_message(topic, canvas_format, model, uploaded_files, theme)
+    user_message = _build_user_message(topic, canvas_format, model, uploaded_files, theme, slide_count_pref)
 
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": get_skill_md()},

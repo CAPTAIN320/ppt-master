@@ -85,6 +85,7 @@ async def create_job(
     model: str = Form(default="claude-sonnet-5"),
     files: list[UploadFile] = File(default=[]),
     theme: str = Form(default="none"),
+    slide_count_pref: str = Form(default=""),
     auto_confirm: str = Form(default="false"),
 ):
     """Create a new PPT generation job."""
@@ -117,6 +118,7 @@ async def create_job(
             uploaded_files=uploaded_files,
             store=store,
             theme=theme,
+            slide_count_pref=slide_count_pref,
             auto_confirm=auto_confirm == "true",
         )
     )
