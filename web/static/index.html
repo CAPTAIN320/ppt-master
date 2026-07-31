@@ -1444,6 +1444,44 @@
       gap: 8px;
     }
 
+    /* ── Per-card animation toggle ─────────────────────────────────────── */
+    .anim-toggle {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      width: fit-content;
+      margin-top: 10px;
+      padding: 3px;
+      border-radius: 999px;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+    }
+
+    .anim-toggle-btn {
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      padding: 5px 10px;
+      border-radius: 999px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+    }
+
+    .anim-toggle-btn:hover:not(.active) {
+      color: var(--text);
+      background: var(--bg-raised);
+    }
+
+    .anim-toggle-btn.active {
+      background: var(--accent-gradient);
+      color: #fff;
+      box-shadow: 0 4px 10px var(--accent-glow);
+    }
+
     .library-card-actions {
       display: flex;
       gap: 8px;
@@ -2887,6 +2925,11 @@ function buildLibraryCard(job, showDelete) {
         <span>🗓 ${escHtml(createdAt)}</span>
         ${slideCount ? `<span>· ${slideCount} slide${slideCount !== 1 ? 's' : ''}</span>` : ''}
       </div>
+      <div class="anim-toggle" id="anim-toggle-${job.id}" data-value="none"
+           title="Animations add element build/entrance effects when opening the deck in PowerPoint. No Animations exports a static deck (page transitions still apply).">
+        <button type="button" class="anim-toggle-btn active" data-anim="none" onclick="setAnimationPref('${job.id}', 'none')">No Animations</button>
+        <button type="button" class="anim-toggle-btn" data-anim="auto" onclick="setAnimationPref('${job.id}', 'auto')">Animations</button>
+      </div>
     </div>
     <div class="library-card-actions">
       ${slideCount > 0 ? `<button class="btn btn-view-slides" onclick="loadJobSlides('${job.id}')">▶ View Slides</button>` : ''}
@@ -2947,6 +2990,20 @@ async function loadLibrary() {
   libraryLoaded = true;
 }
 
+// Per-card animation preference — in-memory only, resets to 'none' on page
+// reload (no per-project persistence mechanism exists for similar toggles).
+const animationPrefs = {};
+
+function setAnimationPref(jobId, value) {
+  animationPrefs[jobId] = value;
+  const toggle = document.getElementById(`anim-toggle-${jobId}`);
+  if (!toggle) return;
+  toggle.dataset.value = value;
+  toggle.querySelectorAll('.anim-toggle-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.anim === value);
+  });
+}
+
 async function downloadPresentation(jobId, title) {
   // Decode any HTML entities that escAttr() may have introduced (e.g. &quot; &#39;)
   // so the fallback filename is clean.
@@ -2964,8 +3021,11 @@ async function downloadPresentation(jobId, title) {
     btn.innerHTML = '⏳ Generating…';
   }
 
+  // Default to 'none' (no per-element builds) when the toggle was never touched.
+  const animation = animationPrefs[jobId] || 'none';
+
   try {
-    const resp = await fetch(`/jobs/${jobId}/export`, { method: 'POST' });
+    const resp = await fetch(`/jobs/${jobId}/export?animation=${encodeURIComponent(animation)}`, { method: 'POST' });
     if (!resp.ok) {
       let detail = `HTTP ${resp.status}`;
       try {

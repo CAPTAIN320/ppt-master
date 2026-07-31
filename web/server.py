@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 import aiofiles
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -472,11 +472,21 @@ def _resolve_proj_dir(job_id: str) -> Path:
     return proj_dir
 
 
-def _run_svg_to_pptx(proj_dir: Path, tmp_path: Path) -> None:
-    """Run svg_to_pptx.py, writing output to tmp_path. Raises HTTPException on failure."""
+def _run_svg_to_pptx(proj_dir: Path, tmp_path: Path, animation: Optional[str] = None) -> None:
+    """Run svg_to_pptx.py, writing output to tmp_path. Raises HTTPException on failure.
+
+    `animation` maps directly to svg_to_pptx.py's `-a`/`--animation` flag
+    ("none" = no per-element entrance builds, page transitions still apply;
+    "auto" = automatic per-element entrance animations). Omitted when None
+    so callers that don't care about the animation toggle keep the script's
+    own default behavior.
+    """
     script_path = REPO_ROOT / "skills" / "ppt-master" / "scripts" / "svg_to_pptx.py"
+    cmd = ["python3", str(script_path), str(proj_dir), "-o", str(tmp_path)]
+    if animation is not None:
+        cmd += ["-a", animation]
     result = subprocess.run(
-        ["python3", str(script_path), str(proj_dir), "-o", str(tmp_path)],
+        cmd,
         cwd=str(REPO_ROOT),
         capture_output=True,
     )
@@ -522,11 +532,18 @@ async def download_pptx(job_id: str, background_tasks: BackgroundTasks):
 
 
 @app.post("/jobs/{job_id}/export")
-async def export_pptx(job_id: str, background_tasks: BackgroundTasks):
+async def export_pptx(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    animation: str = Query(default="none", pattern="^(none|auto)$"),
+):
     """Generate a PPTX on-demand from SVG files — no file is saved permanently.
 
-    Identical logic to GET /jobs/{job_id}/download; kept as a separate POST
-    endpoint for clients that prefer it.
+    Mostly identical logic to GET /jobs/{job_id}/download; kept as a separate
+    POST endpoint for clients that prefer it. Additionally accepts an
+    `animation` query parameter ("none" | "auto") threaded straight through
+    to svg_to_pptx.py's `-a`/`--animation` flag — this is how the project
+    card's No Animations / Animations toggle controls the export.
     """
     proj_dir = _resolve_proj_dir(job_id)
     project_name = proj_dir.name
@@ -535,7 +552,7 @@ async def export_pptx(job_id: str, background_tasks: BackgroundTasks):
     os.close(tmp_fd)
     tmp_path = Path(tmp_name)
 
-    _run_svg_to_pptx(proj_dir, tmp_path)
+    _run_svg_to_pptx(proj_dir, tmp_path, animation=animation)
 
     background_tasks.add_task(tmp_path.unlink, True)
 
