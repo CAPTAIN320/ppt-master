@@ -501,11 +501,21 @@ def _run_svg_to_pptx(proj_dir: Path, tmp_path: Path, animation: Optional[str] = 
 
 
 @app.get("/jobs/{job_id}/download")
-async def download_pptx(job_id: str, background_tasks: BackgroundTasks):
+async def download_pptx(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    animation: str = Query(default="none", pattern="^(none|auto)$"),
+):
     """On-demand PPTX export — generates from SVG on every request, streams, then deletes the temp file.
 
     No PPTX is saved permanently. The file exists on disk only for the duration
     of the HTTP response.
+
+    Accepts the same `animation` query parameter ("none" | "auto") as
+    POST /jobs/{job_id}/export, threaded straight through to svg_to_pptx.py's
+    `-a`/`--animation` flag. This is how the job_done download bar's
+    No Animations / Animations toggle controls the export. Default "none"
+    preserves the pre-existing (transitions-only, no per-element builds) behavior.
     """
     proj_dir = _resolve_proj_dir(job_id)
     project_name = proj_dir.name
@@ -515,7 +525,7 @@ async def download_pptx(job_id: str, background_tasks: BackgroundTasks):
     os.close(tmp_fd)
     tmp_path = Path(tmp_name)
 
-    _run_svg_to_pptx(proj_dir, tmp_path)
+    _run_svg_to_pptx(proj_dir, tmp_path, animation=animation)
 
     # Schedule deletion after the response is fully streamed.
     background_tasks.add_task(tmp_path.unlink, True)
