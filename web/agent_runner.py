@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import os
+import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,12 @@ from .skill_prompt import get_skill_md, get_system_prompt
 from .tools import TOOL_DEFINITIONS, dispatch_tool
 
 REPO_ROOT = Path("/app")
+PROJECTS_DIR = REPO_ROOT / "projects"
+
+# Number of consecutive non-productive turns (truncation, no-progress-stop, or
+# any other unexpected finish_reason) tolerated before the job is failed with
+# an actionable error instead of spinning to max_iterations.
+STALL_THRESHOLD = 3
 
 _THEMES: dict[str, str] = {
     "rakuten-crimson": (
@@ -96,6 +104,109 @@ def _strip_thinking_content_blocks(messages: list[dict[str, Any]]) -> list[dict[
 def _is_gemini_model(model: str) -> bool:
     """Return True if the model name indicates a Gemini model."""
     return "gemini" in model.lower()
+
+
+def _max_tokens_for(model: str) -> int:
+    """Return the max_tokens cap to use for this model.
+
+    All models currently offered in the UI (claude-sonnet-5, claude-sonnet-4.6,
+    gemini-3.1-pro-preview, gpt-5.4) support 32K+ output tokens, so a flat cap
+    is used regardless of model name. The `_is_token_limit_error()` fallback in
+    the call sites (drop to 16000 once, then hard-fail) still protects against
+    the edge case of an env-overridden AGENT_MODEL with a lower real ceiling.
+    """
+    return 32000
+
+
+def _is_token_limit_error(exc: Exception) -> bool:
+    """Best-effort detection of an HTTP 400 caused by a token/max_tokens problem.
+
+    Used only to decide whether a single conservative-cap retry (Step 5) is
+    warranted — intentionally narrow, not a general-purpose retry-everything
+    mechanism.
+    """
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code != 400:
+        return False
+    try:
+        body = (response.text or "").lower()
+    except Exception:
+        body = str(exc).lower()
+    return any(needle in body for needle in ("max_tokens", "maximum context length", "token limit", "too many tokens", "max tokens"))
+
+
+def _has_pipeline_progress(project_path: str | None, since: float | None = None) -> bool:
+    """Return True if the project directory shows any sign of real pipeline work.
+
+    This is fix plan Step 2's broadened artifact/progress check. It is
+    deliberately kept **separate** from the ``exports/*.pptx`` check at the
+    end of ``run_job`` — that check is specifically about whether a PPTX has
+    been exported (deliberately deferred to download time per
+    ``skill_prompt.py``, "Do NOT run svg_to_pptx.py"), and must not be reused
+    here or every normal successful run would be misclassified as incomplete.
+
+    Checks, in order:
+      1. Any SVG under ``svg_output/`` (main pipeline mid/post-generation).
+      2. Both ``design_spec.md`` and ``spec_lock.md`` present (covers the
+         ``refine-spec`` workflow legitimately pausing before SVG generation,
+         and the normal pipeline's Strategist phase).
+      3. Generic fallback: any file under the project directory modified
+         after ``since`` (covers workflows not explicitly enumerated above,
+         e.g. ``native-enhance-pptx``, ``beautify-pptx``).
+    """
+    if not project_path:
+        return False
+    proj = Path(project_path)
+    if not proj.is_dir():
+        return False
+
+    svg_dir = proj / "svg_output"
+    if svg_dir.is_dir() and any(svg_dir.glob("*.svg")):
+        return True
+
+    if (proj / "design_spec.md").is_file() and (proj / "spec_lock.md").is_file():
+        return True
+
+    if since is not None:
+        for f in proj.rglob("*"):
+            if not f.is_file():
+                continue
+            try:
+                if f.stat().st_mtime > since:
+                    return True
+            except OSError:
+                continue
+
+    return False
+
+
+def _fallback_project_path(since: float) -> str | None:
+    """Best-effort: find the most recently modified project directory.
+
+    Used only when the job's tracked ``project_path`` (``store.set_project_path``)
+    is still unset — e.g. a workflow that writes directly via ``run_script``
+    rather than the ``write_file`` tool, so neither the SVG nor the spec-file
+    tracking in ``web/tools.py`` ever fires. Only considers directories
+    modified after ``since`` so it cannot pick up an unrelated pre-existing
+    project.
+    """
+    if not PROJECTS_DIR.is_dir():
+        return None
+    candidates: list[tuple[float, Path]] = []
+    for child in PROJECTS_DIR.iterdir():
+        if not child.is_dir() or child.name == "uploads" or child.name.startswith("."):
+            continue
+        try:
+            mtime = child.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > since:
+            candidates.append((mtime, child))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    return str(candidates[0][1])
 
 
 def _build_user_message(
@@ -203,8 +314,24 @@ async def run_job(
 
     max_iterations = 200  # safety cap
     iteration = 0
+    job_start_ts = time.time()
+    stall_count = 0  # consecutive non-productive turns (fix plan Step 4)
+    last_retry_cause: str | None = None  # "truncation" | "no_progress" | "unexpected"
 
     use_non_streaming = _is_gemini_model(model)
+
+    async def _report_llm_error(exc: Exception) -> None:
+        full_tb = traceback.format_exc()
+        response_body = ""
+        if hasattr(exc, "response") and exc.response is not None:
+            try:
+                response_body = f"\nHTTP {exc.response.status_code}: {exc.response.text[:500]}"
+            except Exception:
+                pass
+        error_msg = f"[Agent] LLM call failed: {exc}{response_body}\n{full_tb}\n"
+        await store.append_log(job_id, error_msg)
+        store.set_error(job_id, str(exc))
+        await store.push_event(job_id, {"type": "error", "message": str(exc)})
 
     while iteration < max_iterations:
         iteration += 1
@@ -221,17 +348,18 @@ async def run_job(
 
         outgoing = [{"role": "system", "content": system_prompt}] + _strip_thinking_content_blocks(messages)
 
-        text_buffer = ""
-        tool_calls_list: list[dict[str, Any]] = []
+        async def _call_llm_once(max_tokens: int) -> tuple[str, list[dict[str, Any]], str | None]:
+            """Perform one LLM call (streaming or non-streaming).
 
-        try:
-            await store.append_log(
-                job_id,
-                f"[Agent] Calling {model} at {agent_base_url} with {len(messages)} messages" f" ({'non-streaming' if use_non_streaming else 'streaming'})\n",
-            )
+            Returns ``(text_buffer, tool_calls_list, finish_reason)``. Raises
+            on transport/API error — the caller handles retry/failure.
+            """
+            local_text = ""
+            local_tool_calls: list[dict[str, Any]] = []
+            local_finish_reason: str | None = None
 
             if use_non_streaming:
-                # ── Non-streaming path (Gemini) ───────────────────────────────
+                # ── Non-streaming path (Gemini) ───────────────────────────
                 # Gemini thinking models attach ``thought_signature`` to tool
                 # calls.  We use non-streaming so the full response object is
                 # returned intact, then capture ``thought_signature`` from
@@ -242,15 +370,16 @@ async def run_job(
                     messages=outgoing,
                     tools=TOOL_DEFINITIONS,
                     tool_choice="auto",
-                    max_tokens=16000,
+                    max_tokens=max_tokens,
                     stream=False,
                 )
                 choice = response.choices[0] if response.choices else None
                 if choice is not None:
+                    local_finish_reason = choice.finish_reason
                     msg = choice.message
-                    text_buffer = msg.content or ""
-                    if text_buffer:
-                        await store.append_log(job_id, text_buffer)
+                    local_text = msg.content or ""
+                    if local_text:
+                        await store.append_log(job_id, local_text)
 
                     if msg.tool_calls:
                         for tc in msg.tool_calls:
@@ -271,10 +400,10 @@ async def run_job(
                                 tc_dict.update(tc.model_extra)
                             if hasattr(tc, "function") and hasattr(tc.function, "model_extra") and tc.function.model_extra:
                                 tc_dict["function"].update(tc.function.model_extra)
-                            tool_calls_list.append(tc_dict)
+                            local_tool_calls.append(tc_dict)
 
             else:
-                # ── Streaming path (non-Gemini) ───────────────────────────────
+                # ── Streaming path (non-Gemini) ───────────────────────────
                 tool_calls_raw: dict[int, dict] = {}  # index → partial tool call
 
                 stream = await client.chat.completions.create(
@@ -282,7 +411,7 @@ async def run_job(
                     messages=outgoing,
                     tools=TOOL_DEFINITIONS,
                     tool_choice="auto",
-                    max_tokens=16000,
+                    max_tokens=max_tokens,
                     stream=True,
                 )
 
@@ -293,9 +422,17 @@ async def run_job(
 
                     delta = choice.delta
 
+                    # Track finish_reason across all chunks (fix plan Step 1)
+                    # — previously only checked once, inline, to end the read
+                    # loop on "stop". Now captured regardless of value so
+                    # "length" (truncation) and any other terminal reason are
+                    # visible to the completion-detection logic below.
+                    if choice.finish_reason:
+                        local_finish_reason = choice.finish_reason
+
                     # Collect text
                     if delta.content:
-                        text_buffer += delta.content
+                        local_text += delta.content
                         await store.append_log(job_id, delta.content)
 
                     # Collect tool call fragments
@@ -319,23 +456,40 @@ async def run_job(
                     if choice.finish_reason == "stop":
                         break
 
-                tool_calls_list = [tool_calls_raw[i] for i in sorted(tool_calls_raw.keys())]
+                local_tool_calls = [tool_calls_raw[i] for i in sorted(tool_calls_raw.keys())]
 
+            return local_text, local_tool_calls, local_finish_reason
+
+        text_buffer = ""
+        tool_calls_list: list[dict[str, Any]] = []
+        finish_reason: str | None = None
+
+        primary_max_tokens = _max_tokens_for(model)
+
+        try:
+            await store.append_log(
+                job_id,
+                f"[Agent] Calling {model} at {agent_base_url} with {len(messages)} messages" f" ({'non-streaming' if use_non_streaming else 'streaming'}, max_tokens={primary_max_tokens})\n",
+            )
+            text_buffer, tool_calls_list, finish_reason = await _call_llm_once(primary_max_tokens)
         except Exception as exc:
-            import traceback
-
-            full_tb = traceback.format_exc()
-            response_body = ""
-            if hasattr(exc, "response") and exc.response is not None:
+            if primary_max_tokens > 16000 and _is_token_limit_error(exc):
+                # Step 5 — narrow, one-shot retry at the conservative cap
+                # before treating this as a hard failure. Avoids turning
+                # "sometimes truncates" into "hard-fails immediately" for
+                # models with a lower real ceiling than _max_tokens_for assumed.
+                await store.append_log(
+                    job_id,
+                    f"[Agent] HTTP 400 looks like a token/max_tokens limit problem at max_tokens={primary_max_tokens}; " f"retrying once at the conservative 16000 cap...\n",
+                )
                 try:
-                    response_body = f"\nHTTP {exc.response.status_code}: {exc.response.text[:500]}"
-                except Exception:
-                    pass
-            error_msg = f"[Agent] LLM call failed: {exc}{response_body}\n{full_tb}\n"
-            await store.append_log(job_id, error_msg)
-            store.set_error(job_id, str(exc))
-            await store.push_event(job_id, {"type": "error", "message": str(exc)})
-            return
+                    text_buffer, tool_calls_list, finish_reason = await _call_llm_once(16000)
+                except Exception as exc2:
+                    await _report_llm_error(exc2)
+                    return
+            else:
+                await _report_llm_error(exc)
+                return
 
         # ── Build assistant message ───────────────────────────────────────────
         assistant_msg: dict[str, Any] = {"role": "assistant", "content": text_buffer or None}
@@ -344,13 +498,107 @@ async def run_job(
 
         messages.append(assistant_msg)
 
-        # ── No tool calls → agent is done ─────────────────────────────────────
+        # ── Completion decision (fix plan Step 3) ───────────────────────────
+        # Replaces the old bare "no tool_calls ⇒ done" check, which
+        # misreported both truncation (finish_reason == "length") and an
+        # early, no-progress stop as successful completion.
         if not tool_calls_list:
-            await store.append_log(job_id, "\n[Agent] Pipeline complete.\n")
-            break
+            job_meta = store.get_job(job_id)
+            current_project_path = job_meta.get("project_path") if job_meta else None
+            if not current_project_path:
+                current_project_path = _fallback_project_path(job_start_ts)
+            has_progress = _has_pipeline_progress(current_project_path, since=job_start_ts)
+
+            if finish_reason == "length":
+                # Truncated mid-thought by the token cap — not a real stop.
+                stall_count += 1
+                last_retry_cause = "truncation"
+                await store.append_log(
+                    job_id,
+                    f"\n[Agent] Response was truncated by the token limit (finish_reason=length) — " f"retrying ({stall_count}/{STALL_THRESHOLD}).\n",
+                )
+                if stall_count >= STALL_THRESHOLD:
+                    fail_msg = (
+                        "Agent repeatedly hit the token limit before completing its turn, even after retries. "
+                        "This may mean the current step is too large for a single turn — "
+                        "try narrowing the request or re-running with a smaller scope."
+                    )
+                    await store.append_log(job_id, f"[Agent] Stall limit reached — failing.\n[Agent] {fail_msg}\n")
+                    store.set_status(job_id, "error")
+                    store.set_error(job_id, fail_msg)
+                    return
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your previous response was cut off by the token limit before you " "finished. Continue exactly where you left off — if you were about " "to call a tool, call it now."
+                        ),
+                    }
+                )
+                continue
+
+            elif finish_reason == "stop" and has_progress:
+                # Genuine completion: the model stopped cleanly AND left
+                # behind real pipeline artifacts (SVGs, or at least a spec).
+                await store.append_log(job_id, "\n[Agent] Pipeline complete.\n")
+                break
+
+            else:
+                # Either finish_reason == "stop" with no progress at all
+                # (confused / stalled before doing any real work), or some
+                # other/unexpected finish_reason (content_filter, null, etc).
+                stall_count += 1
+                last_retry_cause = "no_progress" if finish_reason == "stop" else "unexpected"
+                if finish_reason == "stop":
+                    await store.append_log(
+                        job_id,
+                        f"\n[Agent] Model stopped without producing any pipeline artifacts " f"(no project, spec, or slides found) — retrying ({stall_count}/{STALL_THRESHOLD}).\n",
+                    )
+                else:
+                    await store.append_log(
+                        job_id,
+                        f"\n[Agent] Turn ended with an unexpected finish_reason={finish_reason!r} and no tool calls — " f"retrying ({stall_count}/{STALL_THRESHOLD}).\n",
+                    )
+
+                if stall_count >= STALL_THRESHOLD:
+                    if last_retry_cause == "no_progress":
+                        fail_msg = (
+                            "Agent stopped repeatedly without producing output — this often means "
+                            "the request was ambiguous or missing required source material. Try "
+                            "rephrasing the topic or attaching source files."
+                        )
+                    else:
+                        fail_msg = (
+                            f"Agent stopped repeatedly with an unexpected finish_reason "
+                            f"({finish_reason!r}) and no tool calls or pipeline output. "
+                            f"This may indicate an upstream API or content-filtering issue — try again "
+                            f"or adjust the request."
+                        )
+                    await store.append_log(job_id, f"[Agent] Stall limit reached — failing.\n[Agent] {fail_msg}\n")
+                    store.set_status(job_id, "error")
+                    store.set_error(job_id, fail_msg)
+                    return
+
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "You stopped without making progress on the pipeline (no project, "
+                            "spec, or slides were produced). Please continue the pipeline from "
+                            "SKILL.md, or if the request is ambiguous or missing required "
+                            "information, clearly state what is needed."
+                        ),
+                    }
+                )
+                continue
 
         # ── Execute tool calls ────────────────────────────────────────────────
         for tc in tool_calls_list:
+            # A tool call is actually being executed this turn — reset the
+            # stall counter (fix plan Step 4).
+            stall_count = 0
+            last_retry_cause = None
+
             tool_name = tc["function"]["name"]
             try:
                 tool_args = json.loads(tc["function"]["arguments"] or "{}")
