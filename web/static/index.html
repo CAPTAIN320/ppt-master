@@ -1981,12 +1981,19 @@
       </div>
     </div>
 
-    <!-- Download bar -->
+    <!-- Download bar — visibility gated on job-done state AND the Log tab
+         being active (see updateDownloadVisibility()); recalculated on every
+         tab switch so it hides when leaving Log and reappears on return. -->
     <div id="download-section" class="hidden">
       <div class="download-inner">
         <div class="download-info">
           <div class="download-title">✅ Presentation Ready!</div>
           <div class="download-sub" id="download-filename">Your PPTX has been exported.</div>
+          <div class="anim-toggle" id="download-anim-toggle" data-value="none"
+               title="Animations add element build/entrance effects when opening the deck in PowerPoint. No Animations exports a static deck (page transitions still apply).">
+            <button type="button" class="anim-toggle-btn active" data-anim="none" onclick="setDownloadAnimationPref('none')">No Animations</button>
+            <button type="button" class="anim-toggle-btn" data-anim="auto" onclick="setDownloadAnimationPref('auto')">Animations</button>
+          </div>
         </div>
         <a class="btn btn-download" id="download-btn" href="#" download>
           ⬇ Download PPTX
@@ -2048,6 +2055,10 @@ const state = {
   liveSlideCount: 0,
   confirmData: null,
   downloadUrl: null,
+  // True once the current job has produced a download; independent of which
+  // tab is active. The download-ready section is only actually shown when
+  // this is true AND the Log tab is the active tab (see updateDownloadVisibility()).
+  downloadReady: false,
   selectedFiles: [],
 };
 
@@ -2063,6 +2074,9 @@ function switchTab(name) {
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   document.getElementById(`tab-${name}`).classList.add('active');
   if (name === 'library' && !libraryLoaded) loadLibrary();
+  // The download-ready section only belongs on the Log tab; recalculate its
+  // visibility on every tab switch (see updateDownloadVisibility()).
+  updateDownloadVisibility();
 }
 
 // ── Status badge ───────────────────────────────────────────────────────────
@@ -2750,15 +2764,55 @@ document.addEventListener('keydown', e => {
 });
 
 // ── Download bar ───────────────────────────────────────────────────────────
-function showDownloadBar(url, filename) {
-  const section = document.getElementById('download-section');
-  const btn = document.getElementById('download-btn');
-  const sub = document.getElementById('download-filename');
+// Base URL (without the `animation` query param) for the current job's
+// download link — re-applied whenever the animation toggle changes.
+let downloadBaseUrl = null;
 
-  btn.href = url;
-  btn.download = filename;
+// Animation preference for the job_done download bar — mirrors the
+// per-card Library toggle (animationPrefs), but scoped to this single
+// section since only one job can be "just finished" at a time.
+// Defaults to 'none' (no per-element builds), matching pre-existing behavior.
+let downloadAnimationPref = 'none';
+
+function showDownloadBar(url, filename) {
+  downloadBaseUrl = url;
+  const sub = document.getElementById('download-filename');
   sub.textContent = filename;
-  section.classList.remove('hidden');
+  applyDownloadHref();
+
+  state.downloadReady = true;
+  updateDownloadVisibility();
+}
+
+function applyDownloadHref() {
+  const btn = document.getElementById('download-btn');
+  if (!btn || !downloadBaseUrl) return;
+  const sep = downloadBaseUrl.includes('?') ? '&' : '?';
+  btn.href = `${downloadBaseUrl}${sep}animation=${encodeURIComponent(downloadAnimationPref)}`;
+  const sub = document.getElementById('download-filename');
+  if (sub) btn.download = sub.textContent || 'presentation.pptx';
+}
+
+function setDownloadAnimationPref(value) {
+  downloadAnimationPref = value;
+  const toggle = document.getElementById('download-anim-toggle');
+  if (toggle) {
+    toggle.dataset.value = value;
+    toggle.querySelectorAll('.anim-toggle-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.anim === value);
+    });
+  }
+  applyDownloadHref();
+}
+
+// Shows the download-ready section only when the job is done AND the Log
+// tab is the currently active tab; hides it otherwise. Called on job_done,
+// on every tab switch, and on monitor reset.
+function updateDownloadVisibility() {
+  const section = document.getElementById('download-section');
+  if (!section) return;
+  const logTabActive = document.querySelector('[data-tab="log"]')?.classList.contains('active');
+  section.classList.toggle('hidden', !(state.downloadReady && logTabActive));
 }
 
 // ── Reset helpers ──────────────────────────────────────────────────────────
@@ -2814,7 +2868,12 @@ function resetMonitor() {
   document.getElementById('confirm-tab-btn').style.display = 'none';
   document.getElementById('confirm-fields').innerHTML = '';
 
-  // Hide download
+  // Hide download and reset its animation toggle back to the default before
+  // switchTab('log') below recalculates visibility (updateDownloadVisibility
+  // reads state.downloadReady, so it must be false first).
+  state.downloadReady = false;
+  downloadBaseUrl = null;
+  setDownloadAnimationPref('none');
   document.getElementById('download-section').classList.add('hidden');
 
   // Switch to log tab
