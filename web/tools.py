@@ -11,11 +11,34 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path("/app")
 SCRIPTS_DIR = REPO_ROOT / "skills" / "ppt-master" / "scripts"
+
+
+def _parse_page_count_target(raw: Any) -> int | None:
+    """Best-effort parse of a Strategist page_count value into a single
+    integer target for the frontend's progress indicator.
+
+    Accepts a plain string/int, or the confirm_ui shape ``{"value": "12-15"}``.
+    Uses the **upper bound** when a range is given (e.g. ``"12-15"`` -> 15,
+    ``"~20+"`` -> 20) — a bar that fills to <100% and then jumps to done on a
+    shorter-than-expected deck is a safer failure mode than one that visibly
+    overflows past 100%. Returns None when no integer can be extracted (e.g.
+    ``"Auto"``), so the frontend falls back to an indeterminate indicator.
+    """
+    if isinstance(raw, dict):
+        raw = raw.get("value")
+    if raw is None:
+        return None
+    numbers = re.findall(r"\d+", str(raw))
+    if not numbers:
+        return None
+    return max(int(n) for n in numbers)
+
 
 # ── Tool schemas (OpenAI function-calling format) ─────────────────────────────
 
@@ -223,6 +246,14 @@ async def dispatch_tool(
 
     elif name == "confirm_gate":
         recommendations = args.get("recommendations", {})
+
+        # Push the Strategist's page_count target as a dedicated progress
+        # event *before* branching on auto_confirm, so the frontend's
+        # progress indicator learns the slide-generation target regardless
+        # of whether the Eight Confirmations UI is actually shown to a human.
+        target = _parse_page_count_target(recommendations.get("page_count"))
+        await store.push_event(job_id, {"type": "progress_target", "target": target})
+
         if auto_confirm:
             # Auto-confirm: use the agent's own recommendations as the confirmed result.
             # This bypasses the browser confirmation UI and lets the pipeline proceed immediately.

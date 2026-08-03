@@ -600,6 +600,46 @@
       50% { opacity: 0.3; }
     }
 
+    /* ── Progress badge (header) ──────────────────────────────────────────
+       Persistent, all-tabs indicator showing a continuous 0-100% estimate
+       across the whole pipeline run (drafting / confirming / generating /
+       finalizing), not just the slide-generation phase. Real events (spec
+       drafted, target known, slide_ready, done) snap the percentage; a timer
+       fills in the gaps between events with a smooth asymptotic creep so the
+       bar is never static and never shows a fake "spinning forever" loader.
+       See PROGRESS_BANDS / tickProgress() / renderProgressBadge(). Hidden
+       outside an active job. */
+    #header-progress {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .progress-badge-bar {
+      position: relative;
+      width: 90px;
+      height: 5px;
+      border-radius: 3px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .progress-badge-fill {
+      position: absolute;
+      top: 0;
+      left: 0;
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      border-radius: 3px;
+      transition: width 0.4s linear;
+    }
+    #progress-badge-label {
+      white-space: nowrap;
+    }
+
     /* ── Right panel tabs ─────────────────────────────────────────────────── */
     #right-tabs {
       display: flex;
@@ -672,9 +712,10 @@
     }
 
     /* Live-slide panel — top half of the Log tab, fed only by WebSocket
-       slide_ready events for the actively-generating job. Hidden while idle;
-       shown by addLiveSlideThumb() once the first slide of a run arrives. */
+       slide_ready events for the actively-generating job. Always visible;
+       shows a placeholder when no slides have been generated yet. */
     #log-live-slides-section {
+      display: flex;
       flex: 7;
       min-height: 0;
       padding: 16px clamp(24px, 4vw, 64px) 14px;
@@ -1696,6 +1737,10 @@
       <span class="tagline">AI Presentation Generator</span>
     </div>
     <div class="spacer"></div>
+    <div id="header-progress">
+      <span id="progress-badge-label"></span>
+      <div class="progress-badge-bar"><div class="progress-badge-fill"></div></div>
+    </div>
     <div id="header-status"></div>
     <button id="theme-toggle" title="Toggle light/dark theme" aria-label="Toggle theme">🌙</button>
     <div class="version-badge">v1.0</div>
@@ -1854,14 +1899,14 @@
     <div class="tab-content" id="tab-log">
       <div id="log-container">
         <!-- Live-slide panel: fed only by WebSocket slide_ready events for the
-             actively-generating job. Collapsed/hidden until the first slide
-             of a run arrives (see addLiveSlideThumb()). -->
-        <div id="log-live-slides-section" style="display:none;">
+             actively-generating job. Always visible; shows a placeholder when
+             no slides have been generated yet. -->
+        <div id="log-live-slides-section">
           <div class="section-title" style="display:flex; align-items:center; gap:8px;">
             <span>Live Generation</span>
             <span class="tab-badge" id="log-live-slides-badge" style="display:none;">0</span>
           </div>
-          <div id="log-live-slides-empty" style="display:none;">Slides will appear here as they're generated.</div>
+          <div id="log-live-slides-empty" style="display:flex;">Slides will appear here as they're generated.</div>
           <div id="log-live-slides-layout" style="display:none;">
             <div id="log-live-strip"></div>
             <div id="log-live-viewer">
@@ -2060,6 +2105,16 @@ const state = {
   // this is true AND the Log tab is the active tab (see updateDownloadVisibility()).
   downloadReady: false,
   selectedFiles: [],
+  // Persistent, all-tabs progress indicator (header): a continuous 0-100%
+  // estimate across the whole run, not just slide generation. `phase` is
+  // one of 'idle' | 'drafting' | 'confirming' | 'generating' | 'finalizing'
+  // | 'done'. `percent` is the displayed value — real events snap it up
+  // to a phase-band floor/exact fraction, and a timer creeps it toward the
+  // current phase's ceiling between events so it's never static. `target`
+  // is the Strategist's page_count upper bound (see progress_target event),
+  // or null when unparseable. `current` tracks slides written so far. See
+  // PROGRESS_BANDS / tickProgress() / renderProgressBadge().
+  progress: { phase: 'idle', percent: 0, current: 0, target: null, phaseStartedAt: null },
 };
 
 // Flag: true after the first successful Library load; prevents redundant
@@ -2111,6 +2166,150 @@ function setStatus(status) {
     btn.disabled = busy;
     btn.title = busy ? 'A job is already running' : '';
   }
+}
+
+// ── Progress badge (header) ─────────────────────────────────────────────────
+// Persistent, all-tabs indicator showing a continuous 0-100% estimate across
+// the entire pipeline run. Each phase owns a percentage band sized roughly
+// proportional to its typical real-world share of total run time (drafting
+// alone can run up to ~10 minutes of a ~30-minute deck, so it gets the
+// biggest non-generating band). Real pipeline events snap the percentage to
+// a known point within the current band; between events, tickProgress()
+// advances it along a time-anchored exponential curve — recomputed fresh
+// from elapsed-time-in-phase every tick (not incrementally compounded), so
+// its pace is independent of the tick interval and stays visibly climbing
+// for the phase's entire typical duration instead of flattening out early.
+// `tau` is the curve's time constant (seconds): at elapsed=tau the curve is
+// ~63% through its soft range, ~95% by elapsed=3*tau. Pick tau close to a
+// phase's typical real duration so it's still visibly moving near the end.
+const PROGRESS_BANDS = {
+  drafting:   { floor: 0,  ceiling: 25,  tau: 240 }, // up to ~10 min typical
+  confirming: { floor: 25, ceiling: 30,  tau: 45 },  // usually short, but user may step away
+  generating: { floor: 30, ceiling: 88,  tau: 30 },  // fallback only — slide_ready drives the real fraction
+  finalizing: { floor: 88, ceiling: 98,  tau: 20 },  // post-processing, usually under a minute
+  done:       { floor: 100, ceiling: 100, tau: 1 },
+};
+
+// Soft-range fraction: the timer creep only ever fills this much of a band's
+// width on its own (e.g. 0.92 = up to 92%), guaranteeing the remaining
+// sliver is only ever closed by a real phase-transition event, never by the
+// timer — so the bar can never silently drift into the next phase.
+const PROGRESS_SOFT_RANGE = 0.92;
+
+const PROGRESS_PHASE_LABELS = {
+  drafting:   () => 'Drafting design spec',
+  confirming: () => 'Awaiting your confirmation',
+  generating: (p) => p.target
+    ? `Generating slide ${p.current} of ${p.target}`
+    : `Generating slide ${p.current}`,
+  finalizing: () => 'Finalizing presentation',
+  done:       () => 'Done',
+};
+
+let _progressTimer = null;
+
+function setProgressPhase(phase) {
+  state.progress.phase = phase;
+  state.progress.phaseStartedAt = Date.now();
+  const band = PROGRESS_BANDS[phase];
+  // Snap to the new band's floor immediately (never let the number regress
+  // below where the previous band left off, and never leave a stale value
+  // from the prior phase showing under the new phase's label).
+  if (band) state.progress.percent = Math.max(state.progress.percent, band.floor);
+  renderProgressBadge();
+  _startProgressTimer();
+}
+
+function setProgressTarget(target) {
+  state.progress.target = target;
+  renderProgressBadge();
+}
+
+function incrementProgressSlide() {
+  state.progress.current += 1;
+  // A slide_ready event only fires once generation is underway; make sure
+  // the phase reflects that even if a 'generating' transition was missed.
+  if (state.progress.phase !== 'generating') setProgressPhase('generating');
+  const band = PROGRESS_BANDS.generating;
+  if (state.progress.target && state.progress.target > 0) {
+    // Real fraction: exact position within the generating band. This is a
+    // hard event-driven value — reset the phase timer so tickProgress()'s
+    // time-anchored creep (used only as a fallback between slide_ready
+    // events, or when target is unknown) resumes counting from *now*
+    // rather than from whenever 'generating' first started.
+    const frac = Math.min(1, state.progress.current / state.progress.target);
+    state.progress.percent = Math.max(state.progress.percent, band.floor + frac * (band.ceiling - band.floor));
+  } else {
+    // No usable target — guarantee a small visible bump per slide so the
+    // bar still visibly reacts to real events even without a denominator.
+    const softCeiling = band.floor + (band.ceiling - band.floor) * PROGRESS_SOFT_RANGE;
+    state.progress.percent = Math.min(softCeiling, state.progress.percent + 2);
+  }
+  state.progress.phaseStartedAt = Date.now();
+  renderProgressBadge();
+}
+
+function setProgressDone() {
+  if (_progressTimer) { clearInterval(_progressTimer); _progressTimer = null; }
+  state.progress.phase = 'done';
+  state.progress.percent = 100;
+  renderProgressBadge();
+}
+
+function resetProgress() {
+  if (_progressTimer) { clearInterval(_progressTimer); _progressTimer = null; }
+  state.progress = { phase: 'idle', percent: 0, current: 0, target: null, phaseStartedAt: null };
+  renderProgressBadge();
+}
+
+function _startProgressTimer() {
+  if (_progressTimer) return; // already running
+  _progressTimer = setInterval(tickProgress, 500);
+}
+
+function tickProgress() {
+  const { phase, phaseStartedAt } = state.progress;
+  const band = PROGRESS_BANDS[phase];
+  if (!band || phase === 'done' || phase === 'idle' || !phaseStartedAt) {
+    clearInterval(_progressTimer);
+    _progressTimer = null;
+    return;
+  }
+  // Time-anchored exponential: percent = floor + softRange * (1 - e^(-t/tau)).
+  // Recomputed fresh from elapsed time each tick, so the curve's pace does
+  // not depend on how often tickProgress() happens to run.
+  const elapsedSeconds = (Date.now() - phaseStartedAt) / 1000;
+  const width = band.ceiling - band.floor;
+  const softRange = width * PROGRESS_SOFT_RANGE;
+  const eased = softRange * (1 - Math.exp(-elapsedSeconds / band.tau));
+  const candidate = band.floor + eased;
+  // Never let the timer regress a value that real events (e.g. slide_ready)
+  // already pushed higher than the pure time-based curve would predict.
+  if (candidate > state.progress.percent) {
+    state.progress.percent = candidate;
+    renderProgressBadge();
+  }
+}
+
+function renderProgressBadge() {
+  const el = document.getElementById('header-progress');
+  const labelEl = document.getElementById('progress-badge-label');
+  const fillEl = el ? el.querySelector('.progress-badge-fill') : null;
+  if (!el || !labelEl || !fillEl) return;
+
+  const { phase, percent } = state.progress;
+
+  if (phase === 'idle') {
+    el.style.display = 'none';
+    return;
+  }
+
+  el.style.display = 'flex';
+  const labelFn = PROGRESS_PHASE_LABELS[phase];
+  const phaseText = labelFn ? labelFn(state.progress) : '';
+  const pct = Math.max(0, Math.min(100, Math.round(percent)));
+  labelEl.textContent = `${phaseText} · ${pct}%`;
+  fillEl.style.width = `${pct}%`;
 }
 
 // ── File handling ──────────────────────────────────────────────────────────
@@ -2223,6 +2422,7 @@ async function startJob() {
     // Connect WebSocket
     connectWebSocket(state.jobId);
     switchTab('log');
+    setProgressPhase('drafting');
 
   } catch (err) {
     showToast(err.message);
@@ -2298,11 +2498,29 @@ function handleEvent(event) {
 
     case 'log':
       appendLog(event.text);
+      // Detect the finalize_svg.py invocation (see web/skill_prompt.py — the
+      // agent is instructed to run it once all slides are written) to move
+      // the progress badge into its last real phase before 'done'. There is
+      // no dedicated event for this step, so log-text sniffing is the only
+      // signal available without touching the pipeline scripts themselves.
+      if (state.progress.phase === 'generating' && /finalize_svg\.py/.test(event.text)) {
+        setProgressPhase('finalizing');
+      }
+      break;
+
+    case 'progress_target':
+      // Pushed by confirm_gate right before branching on auto_confirm, so
+      // the target is known even when the Eight Confirmations UI never
+      // shows (auto-approve). null means the Strategist's page_count value
+      // was unparseable (e.g. "Auto") — renderProgressBadge() falls back to
+      // an indeterminate indicator in that case.
+      setProgressTarget(event.target);
       break;
 
     case 'confirm_required':
       state.confirmData = event.data;
       setStatus('confirm_pending');
+      setProgressPhase('confirming');
       renderConfirmPanel(event.data);
       // Show confirm tab and switch to it
       const confirmTabBtn = document.getElementById('confirm-tab-btn');
@@ -2313,6 +2531,7 @@ function handleEvent(event) {
 
     case 'slide_ready':
       state.liveSlideCount = (state.liveSlideCount || 0) + 1;
+      incrementProgressSlide();
       addLiveSlideThumb(event.slide, event.url);
       // Update the live badge (Log tab) — the Slides tab no longer reacts
       // to live generation progress at all.
@@ -2324,6 +2543,12 @@ function handleEvent(event) {
 
     case 'job_done':
       setStatus('done');
+      // Show a real 100% momentarily (rather than snapping straight to
+      // idle/hidden) so the user actually sees the bar complete, then hide
+      // the badge shortly after — matches the "done" moment in most
+      // installer/CI progress UIs.
+      setProgressDone();
+      setTimeout(resetProgress, 1500);
       state.downloadUrl = event.download_url;
       if (event.download_url) {
         showDownloadBar(event.download_url, event.filename || 'presentation.pptx');
@@ -2337,6 +2562,7 @@ function handleEvent(event) {
 
     case 'error':
       setStatus('error');
+      resetProgress();
       appendLog(`\n❌ Error: ${event.message}\n`, 'log-error');
       showToast(event.message);
       resetGenerateBtn();
@@ -2507,6 +2733,7 @@ async function submitConfirm() {
     }
 
     setStatus('running');
+    setProgressPhase('generating');
     // Hide confirm tab, switch to log
     document.getElementById('confirm-tab-btn').style.display = 'none';
     switchTab('log');
@@ -2613,9 +2840,8 @@ function addLiveSlideThumb(slideNum, url) {
   // Guard against duplicates, same rationale as addSlideThumb().
   if (document.getElementById(`log-live-strip-item-${slideNum}`)) return;
 
-  // First slide of a run: reveal the panel and its layout.
-  const section = document.getElementById('log-live-slides-section');
-  if (section.style.display === 'none') section.style.display = 'flex';
+  // First slide of a run: show the layout and hide the empty placeholder.
+  // (The section itself is always visible — no need to reveal it.)
   // Collapsing the log section only makes sense when there's a live-slides
   // panel above it to expand into, so the toggle tracks this section's
   // visibility.
@@ -2840,12 +3066,11 @@ function resetMonitor() {
   document.getElementById('slides-badge').textContent = '0';
 
   // Clear live-slide panel (Log tab) — fed only by WebSocket slide_ready
-  // events for the actively-generating job. Collapse it back to hidden
-  // until the next job's first slide arrives.
+  // events for the actively-generating job. Keep the section visible but
+  // reset its content and show the empty placeholder for the next run.
   document.getElementById('log-live-strip').innerHTML = '';
-  document.getElementById('log-live-slides-section').style.display = 'none';
   document.getElementById('log-live-slides-layout').style.display = 'none';
-  document.getElementById('log-live-slides-empty').style.display = 'none';
+  document.getElementById('log-live-slides-empty').style.display = 'flex';
   const liveViewerImg = document.getElementById('log-live-viewer-img');
   liveViewerImg.src = '';
   liveViewerImg.style.display = 'none';
@@ -2875,6 +3100,9 @@ function resetMonitor() {
   downloadBaseUrl = null;
   setDownloadAnimationPref('none');
   document.getElementById('download-section').classList.add('hidden');
+
+  // Reset the header progress badge back to hidden/idle for the next job.
+  resetProgress();
 
   // Switch to log tab
   switchTab('log');
@@ -3265,6 +3493,21 @@ if (savedJobId) {
         const slideCount = job.slide_count || 0;
         for (let i = 1; i <= slideCount; i++) {
           addLiveSlideThumb(i, `/jobs/${savedJobId}/slides/${i}`);
+        }
+        // Best-effort backfill of the header progress badge. The
+        // progress_target event (from confirm_gate) is not replayed on
+        // reconnect — only log text is (see server.py) — so `target` stays
+        // null (indeterminate bar) unless a fresh progress_target event
+        // happens to arrive later in this same run. Phase is inferred from
+        // job status + whether any slides exist yet.
+        state.liveSlideCount = slideCount;
+        if (job.status === 'confirm_pending') {
+          setProgressPhase('confirming');
+        } else if (slideCount > 0) {
+          state.progress.current = slideCount;
+          setProgressPhase('generating');
+        } else {
+          setProgressPhase('drafting');
         }
         connectWebSocket(savedJobId);
       } else {
