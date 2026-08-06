@@ -2920,10 +2920,6 @@ function addLiveSlideThumb(slideNum, url) {
 
   // First slide of a run: show the layout and hide the empty placeholder.
   // (The section itself is always visible — no need to reveal it.)
-  // Collapsing the log section only makes sense when there's a live-slides
-  // panel above it to expand into, so the toggle tracks this section's
-  // visibility.
-  document.getElementById('log-collapse-toggle').style.display = 'flex';
   const empty = document.getElementById('log-live-slides-empty');
   if (empty) empty.style.display = 'none';
   const loader = document.getElementById('log-live-loader');
@@ -3160,12 +3156,10 @@ function resetMonitor() {
   liveBadge.style.display = 'none';
   liveBadge.textContent = '0';
 
-  // Hide the log-collapse toggle along with the live-slides section it
-  // controls space for, and reset any stale collapsed state so a fresh
-  // job always starts with the log section expanded.
+  // Reset any stale collapsed state so a fresh job always starts with
+  // the log section expanded.
   document.getElementById('log-text-section').classList.remove('log-text-collapsed');
   const logCollapseBtn = document.getElementById('log-collapse-toggle');
-  logCollapseBtn.style.display = 'none';
   logCollapseBtn.textContent = '▼';
   logCollapseBtn.title = 'Collapse log';
   logCollapseBtn.setAttribute('aria-label', 'Collapse log');
