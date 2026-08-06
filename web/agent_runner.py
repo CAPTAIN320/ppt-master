@@ -11,6 +11,7 @@ executes the full serial pipeline:
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
@@ -217,7 +218,7 @@ def _build_user_message(
     theme: str = "none",
     slide_count_pref: str = "",
     image_usage_pref: str = "",
-) -> str:
+) -> str | list:
     """Build the initial user message for the agent."""
     parts = []
 
@@ -264,7 +265,25 @@ def _build_user_message(
             f"dict matches this preference exactly (map to the pipeline's image_usage ids: 'ai', 'provided', 'web', or 'none')."
         )
 
-    return "\n\n".join(parts)
+    joined_text = "\n\n".join(parts)
+
+    image_files = [f for f in uploaded_files if f.get("type", "").startswith("image/")]
+    if not image_files:
+        return joined_text
+
+    content_blocks: list[dict] = [{"type": "text", "text": joined_text}]
+    for f in image_files:
+        try:
+            data = Path(f["path"]).read_bytes()
+        except FileNotFoundError:
+            print(f"WARNING: Image file not found, skipping: {f['path']}")
+            continue
+        b64 = base64.b64encode(data).decode()
+        data_url = f"data:{f['type']};base64,{b64}"
+        content_blocks.append({"type": "text", "text": f"[Image: {f['name']}]"})
+        content_blocks.append({"type": "image_url", "image_url": {"url": data_url}})
+
+    return content_blocks
 
 
 async def run_job(
