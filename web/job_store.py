@@ -185,9 +185,12 @@ class JobStore:
                             except Exception:
                                 pass  # Non-fatal; count is correct in memory for this call
 
+            # Skip jobs with no project_path — they cannot be downloaded and
+            # would show a broken download button in the Library.
+            if not job.get("project_path"):
+                continue
             result.append(job)
-            if job.get("project_path"):
-                known_project_names.add(Path(job["project_path"]).name)
+            known_project_names.add(Path(job["project_path"]).name)
 
         # ── Orphan project directories ────────────────────────────────────────
         # Scan /app/projects/ for directories that have svg_output/ or svg_final/

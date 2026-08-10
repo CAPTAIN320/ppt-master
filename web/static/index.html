@@ -3295,7 +3295,7 @@ function buildLibraryCard(job, showDelete) {
     </div>
     <div class="library-card-actions">
       ${slideCount > 0 ? `<button class="btn btn-view-slides" onclick="loadJobSlides('${job.id}')">▶ View Slides</button>` : ''}
-      <button class="btn btn-lib-download" id="dl-btn-${job.id}" onclick="downloadPresentation('${job.id}', '${escAttr(title)}')" title="Download PPTX">⬇ PPTX</button>
+      <button class="btn btn-lib-download" id="dl-btn-${job.id}" onclick="downloadPresentation('${job.id}', ${JSON.stringify(title)})" title="Download PPTX">⬇ PPTX</button>
       ${showDelete ? `<button class="btn btn-lib-delete" onclick="deletePresentation('${job.id}')" title="Delete presentation">🗑</button>` : ''}
     </div>
   `;
