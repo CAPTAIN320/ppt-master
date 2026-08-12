@@ -33,41 +33,9 @@ PROJECTS_DIR = REPO_ROOT / "projects"
 # an actionable error instead of spinning to max_iterations.
 STALL_THRESHOLD = 3
 
-_THEMES: dict[str, str] = {
-    "rakuten-crimson": (
-        "Brand theme: Rakuten Crimson\n"
-        "- Primary: #BF0000 (crimson red)\n"
-        "- Background: #FFFFFF (white)\n"
-        "- Accent: #777B7E (gray)\n"
-        "Lock this palette in §III Visual Theme and §V Layout. Do not deviate.\n"
-        "Background MUST be white (#FFFFFF) on all slides. "
-        "Do NOT select any dark-background visual style "
-        "(dark-tech, blueprint, dark-cinematic, chalkboard, ink-wash, pixel-art, "
-        "or any style with a dark/black canvas). "
-        "Choose only light-background styles (swiss-minimal, soft-rounded, editorial, "
-        "glassmorphism, photo-editorial, or similar).\n"
-        "On every slide, add a footer bar at the bottom of the canvas:\n"
-        '- Bottom-left Rakuten wordmark: <text x="40" y="[canvas_height - 28]" font-size="14" font-weight="bold" fill="#BF0000" font-family="sans-serif">Rakuten</text>\n'
-        '- Bottom-right confidential label: <text x="[canvas_width - 40]" y="[canvas_height - 28]" font-size="10" fill="#777B7E" text-anchor="end" font-family="sans-serif">Confidential</text>\n'
-        "Replace [canvas_height] and [canvas_width] with the actual SVG canvas dimensions for each slide."
-    ),
-    "rakuten-mobile": (
-        "Brand theme: Rakuten Mobile\n"
-        "- Primary: #FF008C (Rakuten pink)\n"
-        "- Background: #FFFFFF (white)\n"
-        "- Accent: #777B7E (gray)\n"
-        "Lock this palette in §III Visual Theme and §V Layout. Do not deviate.\n"
-        "Background MUST be white (#FFFFFF) on all slides. "
-        "Do NOT select any dark-background visual style "
-        "(dark-tech, blueprint, dark-cinematic, chalkboard, ink-wash, pixel-art, "
-        "or any style with a dark/black canvas). "
-        "Choose only light-background styles (swiss-minimal, soft-rounded, editorial, "
-        "glassmorphism, photo-editorial, or similar).\n"
-        "On every slide, add a footer bar at the bottom of the canvas:\n"
-        '- Bottom-left Rakuten wordmark: <text x="40" y="[canvas_height - 28]" font-size="14" font-weight="bold" fill="#FF008C" font-family="sans-serif">Rakuten Mobile</text>\n'
-        '- Bottom-right confidential label: <text x="[canvas_width - 40]" y="[canvas_height - 28]" font-size="10" fill="#777B7E" text-anchor="end" font-family="sans-serif">Confidential</text>\n'
-        "Replace [canvas_height] and [canvas_width] with the actual SVG canvas dimensions for each slide."
-    ),
+_BRAND_PATHS: dict[str, str] = {
+    "rakuten-crimson": "skills/ppt-master/templates/brands/rakuten_crimson/",
+    "rakuten-mobile":  "skills/ppt-master/templates/brands/rakuten_mobile/",
 }
 
 
@@ -236,8 +204,11 @@ def _build_user_message(
         f"PPTX export is handled on demand by the server when the user clicks Download."
     )
 
-    if theme != "none" and theme in _THEMES:
-        parts.append(_THEMES[theme])
+    if theme != "none" and theme in _BRAND_PATHS:
+        parts.append(
+            f"Brand template path: {_BRAND_PATHS[theme]}\n"
+            f"Apply this brand at SKILL.md Step 3 using the explicit path above."
+        )
 
     if slide_count_pref:
         parts.append(

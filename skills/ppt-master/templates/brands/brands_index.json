@@ -14,5 +14,13 @@
   "中汽研": {
     "summary": "CATARC brand identity for product certification, evaluation reports, automotive technology promotion, and business visits",
     "primary_color": "#004098"
+  },
+  "rakuten_crimson": {
+    "summary": "Rakuten Group corporate brand — investor relations, group company reports, brand partnership decks, sports sponsorship",
+    "primary_color": "#BF0000"
+  },
+  "rakuten_mobile": {
+    "summary": "Rakuten Mobile brand — 5G network decks, telecom product launches, subscriber growth reports, MNO/MVNO partner presentations",
+    "primary_color": "#FF008C"
   }
 }
