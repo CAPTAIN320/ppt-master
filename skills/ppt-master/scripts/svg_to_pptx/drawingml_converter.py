@@ -286,7 +286,7 @@ def convert_g(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
 # Defs collection & element dispatch
 # ---------------------------------------------------------------------------
 
-_NON_VISUAL_TAGS = frozenset(('defs', 'title', 'desc', 'metadata', 'style'))
+_NON_VISUAL_TAGS = frozenset(('defs', 'title', 'desc', 'metadata', 'style', 'use'))
 
 
 def _supports_matrix_transform(elem: ET.Element) -> bool:
@@ -460,19 +460,22 @@ def convert_svg_to_slide_shapes(
     trace_events: list[dict[str, Any]] | None = [] if trace_out is not None else None
     trace_steps: list[dict[str, Any]] = []
 
-    # Expand <use data-icon="..."/> placeholders in-memory so this dispatcher
-    # can consume svg_output/ directly. Standard renderers and this converter
-    # both ignore data-icon, so without expansion icons would silently drop.
-    # The on-disk finalize_svg pipeline does the same expansion for svg_final/;
-    # running this here makes the two pipelines behaviourally aligned.
+    # Expand <use> elements in-memory so this dispatcher can consume
+    # svg_output/ directly:
+    #   • <use data-icon="..."/> — project-internal icon placeholders
+    #   • <use href="#id"> / <use xlink:href="#id"> — standard SVG internal
+    #     references (e.g. shapes defined in <defs>)
+    # Without expansion both forms would reach the unsupported-element check
+    # and raise SvgNativeConversionError. The on-disk finalize_svg pipeline
+    # handles data-icon the same way; running both here keeps the two
+    # pipelines behaviourally aligned.
     icons_dir = Path(__file__).resolve().parent.parent.parent / 'templates' / 'icons'
-    if icons_dir.exists():
-        from .use_expander import expand_use_data_icons
-        expanded = expand_use_data_icons(root, icons_dir)
-        if expanded:
-            trace_steps.append({'action': 'expand-use-data-icons', 'count': expanded})
-        if verbose and expanded:
-            print(f'  Expanded {expanded} <use data-icon="..."/> placeholder(s)')
+    from .use_expander import expand_all_use_elements
+    expanded = expand_all_use_elements(root, icons_dir)
+    if expanded:
+        trace_steps.append({'action': 'expand-use-elements', 'count': expanded})
+    if verbose and expanded:
+        print(f'  Expanded {expanded} <use .../> element(s)')
 
     # Flatten positional <tspan> (those with x/y/non-zero dy) into independent
     # <text> elements. DrawingML runs cannot reposition mid-paragraph, so a
