@@ -50,6 +50,7 @@ def _init_db() -> None:
                 confirm_result TEXT,
                 error_message TEXT,
                 topic TEXT,
+                model TEXT,
                 slide_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -59,6 +60,8 @@ def _init_db() -> None:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
         if "topic" not in existing:
             conn.execute("ALTER TABLE jobs ADD COLUMN topic TEXT")
+        if "model" not in existing:
+            conn.execute("ALTER TABLE jobs ADD COLUMN model TEXT")
         if "slide_count" not in existing:
             conn.execute("ALTER TABLE jobs ADD COLUMN slide_count INTEGER NOT NULL DEFAULT 0")
         conn.commit()
@@ -77,13 +80,13 @@ _log_queues: dict[str, asyncio.Queue] = {}
 
 
 class JobStore:
-    def create_job(self, topic: str = "") -> str:
+    def create_job(self, topic: str = "", model: str = "") -> str:
         job_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
         with _get_conn() as conn:
             conn.execute(
-                "INSERT INTO jobs (id, status, topic, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                (job_id, "queued", topic, now, now),
+                "INSERT INTO jobs (id, status, topic, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (job_id, "queued", topic, model, now, now),
             )
             conn.commit()
         _confirm_events[job_id] = asyncio.Event()
@@ -143,7 +146,7 @@ class JobStore:
         """
         with _get_conn() as conn:
             rows = conn.execute(
-                "SELECT id, status, topic, project_path, slide_count, created_at, updated_at "
+                "SELECT id, status, topic, model, project_path, slide_count, created_at, updated_at "
                 "FROM jobs WHERE status = 'done' ORDER BY created_at DESC"
             ).fetchall()
         result = []
@@ -240,6 +243,7 @@ class JobStore:
                     "id": synthetic_id,
                     "status": "done",
                     "topic": topic,
+                    "model": None,
                     "project_path": str(proj_dir),
                     "slide_count": slide_count,
                     "created_at": created_at,
@@ -298,6 +302,7 @@ class JobStore:
                 "id": ex_dir.name,
                 "status": "done",
                 "topic": topic,
+                "model": None,
                 "project_path": str(ex_dir),
                 "slide_count": slide_count,
                 "created_at": ts,

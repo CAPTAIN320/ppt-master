@@ -90,7 +90,7 @@ async def create_job(
     auto_confirm: str = Form(default="false"),
 ):
     """Create a new PPT generation job."""
-    job_id = store.create_job(topic=topic)
+    job_id = store.create_job(topic=topic, model=model)
 
     # Save uploaded files
     uploaded_files = []
@@ -199,6 +199,7 @@ async def get_job(job_id: str):
             "id": job_id,
             "status": "done",
             "topic": topic,
+            "model": None,
             "project_path": str(proj_dir),
             "slide_count": slide_count,
             "download_url": f"/jobs/{job_id}/download",
