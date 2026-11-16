@@ -28,11 +28,17 @@ final class AiGateway
         }
         $max = $maxTokens ?? max(512, (int) ($settings['max_tokens'] ?? 8192));
 
-        $reply = $ai->chat($messages, [
-            'model' => $resolved,
-            'temperature' => $temperature,
-            'max_tokens' => $max,
-        ]);
+        // Azure AI reasoning models (gpt-5.6-*, gpt-6.1-*) reject any temperature != 1.0,
+        // so temperature is intentionally never forwarded; $temperature is kept for API compat only.
+        try {
+            $reply = $ai->chat($messages, [
+                'model' => $resolved,
+                'max_tokens' => $max,
+            ]);
+        } catch (\Throwable $e) {
+            // Retry once with the minimal option set used by the reference integrations.
+            $reply = $ai->chat($messages, ['model' => $resolved]);
+        }
 
         return [
             'content' => (string) ($reply['content'] ?? ''),

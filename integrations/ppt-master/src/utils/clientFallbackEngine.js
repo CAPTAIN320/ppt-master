@@ -35,9 +35,20 @@ export const FALLBACK_CANVASES = [
   { id: 'xiaohongshu', label: '3:4 Portrait (1242x1660)', width: 1242, height: 1660 },
 ];
 
+export const FALLBACK_MODELS = [
+  { key: 'gpt-5.6-luna', label: 'gpt-5.6-luna' },
+  { key: 'gpt-5.6-sol', label: 'gpt-5.6-sol' },
+  { key: 'gpt-5.6-terra', label: 'gpt-5.6-terra' },
+  { key: 'gpt-6.1-sol', label: 'gpt-6.1-sol' },
+  { key: 'claude-opus-5-5', label: 'claude-opus-5-5' },
+  { key: 'claude-haiku-4-5', label: 'claude-haiku-4-5' },
+  { key: 'gpt-5.1', label: 'gpt-5.1' },
+  { key: 'gpt-4o', label: 'gpt-4o' },
+];
+
 export const FALLBACK_CONFIG = {
-  models: [],
-  defaultModel: '',
+  models: FALLBACK_MODELS,
+  defaultModel: 'gpt-5.6-luna',
   brands: FALLBACK_BRANDS,
   canvasFormats: FALLBACK_CANVASES,
   settings: { default_brand: 'rakuten-mobile' },
@@ -51,7 +62,8 @@ export function normalizeConfig(c) {
   return {
     ...FALLBACK_CONFIG,
     ...cfg,
-    models: Array.isArray(cfg.models) ? cfg.models : [],
+    models: Array.isArray(cfg.models) && cfg.models.length ? cfg.models : FALLBACK_MODELS,
+    defaultModel: typeof cfg.defaultModel === 'string' && cfg.defaultModel ? cfg.defaultModel : FALLBACK_CONFIG.defaultModel,
     brands: Array.isArray(cfg.brands) && cfg.brands.length ? cfg.brands : FALLBACK_BRANDS,
     canvasFormats: Array.isArray(cfg.canvasFormats) && cfg.canvasFormats.length ? cfg.canvasFormats : FALLBACK_CANVASES,
     settings: cfg.settings && typeof cfg.settings === 'object' && !Array.isArray(cfg.settings) ? cfg.settings : FALLBACK_CONFIG.settings,
