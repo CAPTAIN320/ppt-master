@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "name": "ppt-master",
+  "displayName": "PPT Master",
+  "version": "1.0.0",
+  "description": "AI-powered presentation strategist and SVG-to-PPTX slide generator with Rakuten brand presets, Eight Confirmations workflow, and native editable PowerPoint export.",
+  "author": "PPT Master Team",
+  "sdk": "^1.0",
+  "access": "authenticated",
+  "capabilities": ["ai", "storage", "http"],
+  "frontend": {
+    "entry": "src/main.jsx"
+  },
+  "sidebar": [
+    {
+      "label": "PPT Master",
+      "path": "",
+      "icon": "Presentation",
+      "position": 30
+    }
+  ],
+  "settings": [
+    {
+      "key": "default_model",
+      "type": "string",
+      "label": "Default AI model (blank uses Analyzer default)",
+      "default": ""
+    },
+    {
+      "key": "default_brand",
+      "type": "string",
+      "label": "Default brand preset (rakuten-mobile, rakuten-crimson, anthropic, google, corporate-blue, none)",
+      "default": "rakuten-mobile"
+    },
+    {
+      "key": "ppt_master_backend_url",
+      "type": "string",
+      "label": "Optional external PPT Master FastAPI server URL (blank uses built-in Analyzer AI engine)",
+      "default": ""
+    },
+    {
+      "key": "max_tokens",
+      "type": "string",
+      "label": "Max tokens per AI generation call",
+      "default": "8192"
+    }
+  ]
+}
