@@ -8,7 +8,7 @@ export function ExportPanel({ project }) {
   const [error, setError] = useState('');
   const [note, setNote] = useState('');
   const [prog, setProg] = useState([0, 0]);
-  const hasSvgs = Object.keys(project.svgs || {}).length > 0;
+  const hasSvgs = Object.keys(project?.svgs || {}).length > 0;
 
   async function run(label, fn) {
     setBusy(label); setError(''); setNote(''); setProg([0, 0]);
@@ -18,7 +18,7 @@ export function ExportPanel({ project }) {
     <div className="aik-card aik-stack aik-stack--gap-3">
       <h2 className="aik-page__title" style={{ fontSize: 'var(--aik-font-size-lg)' }}>Step 4 · Export</h2>
       <div className="aik-row aik-row--gap-2" style={{ flexWrap: 'wrap' }}>
-        <button type="button" className="aik-btn aik-btn--primary" disabled={!!busy || !(project.slides || []).length} onClick={() => run('editable', async () => downloadBlob(await exportEditablePptx(project), safeName(project, 'pptx')))}>Download editable .pptx</button>
+        <button type="button" className="aik-btn aik-btn--primary" disabled={!!busy || !(project?.slides || []).length} onClick={() => run('editable', async () => downloadBlob(await exportEditablePptx(project), safeName(project, 'pptx')))}>Download editable .pptx</button>
         <button type="button" className="aik-btn aik-btn--secondary" disabled={!!busy || !hasSvgs} onClick={() => run('visual', async () => {
           const { blob, skipped } = await exportVisualPptx(project, (d, t) => setProg([d, t]));
           downloadBlob(blob, safeName(project, 'visual.pptx'));

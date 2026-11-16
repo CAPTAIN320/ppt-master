@@ -32,7 +32,7 @@ final class RemoteBackendBridge
     }
 
     /** @return array{configured: bool, url: string, reachable: bool} */
-    public function status(): array
+    public function status(int $timeout = 2): array
     {
         $url = self::normalize($this->base);
         if ($url === '') {
@@ -40,7 +40,7 @@ final class RemoteBackendBridge
         }
         $ok = false;
         try {
-            $ok = Http::timeout(8)->acceptJson()->get($url.'/jobs')->successful();
+            $ok = Http::timeout(max(1, $timeout))->acceptJson()->get($url.'/jobs')->successful();
         } catch (\Throwable $e) {
             $ok = false;
         }
@@ -106,7 +106,55 @@ final class RemoteBackendBridge
     /** @return array<string, mixed> */
     public function getJob(string $jobId): array
     {
-        return $this->json(Http::timeout(30)->acceptJson()->get($this->url('/jobs/'.rawurlencode($jobId))));
+        $job = $this->json(Http::timeout(30)->acceptJson()->get($this->url('/jobs/'.rawurlencode($jobId))));
+
+        // R1: FastAPI stores these as JSON text columns.
+        foreach (['confirm_data', 'confirm_result'] as $k) {
+            if (isset($job[$k]) && is_string($job[$k]) && trim($job[$k]) !== '') {
+                $decoded = json_decode($job[$k], true);
+                if (is_array($decoded)) {
+                    $job[$k] = $decoded;
+                }
+            }
+        }
+        // R2: surface the backend error under the key the UI reads.
+        if (empty($job['error']) && ! empty($job['error_message'])) {
+            $job['error'] = $job['error_message'];
+        }
+        // R3: slide_count is only maintained by the websocket; recompute from the jobs list or by probing.
+        if ((int) ($job['slide_count'] ?? 0) <= 0 && ($job['status'] ?? '') === 'done') {
+            $job['slide_count'] = $this->probeSlideCount($jobId);
+        }
+
+        return $job;
+    }
+
+    private function probeSlideCount(string $jobId): int
+    {
+        try {
+            $list = $this->listJobs()['jobs'] ?? [];
+            foreach ($list as $j) {
+                if (is_array($j) && (string) ($j['id'] ?? '') === $jobId && (int) ($j['slide_count'] ?? 0) > 0) {
+                    return (int) $j['slide_count'];
+                }
+            }
+        } catch (\Throwable $e) {
+            // fall through to probing
+        }
+        $count = 0;
+        for ($n = 1; $n <= 60; $n++) {
+            try {
+                $res = Http::timeout(10)->get($this->url('/jobs/'.rawurlencode($jobId).'/slides/'.$n));
+            } catch (\Throwable $e) {
+                break;
+            }
+            if (! $res->successful()) {
+                break;
+            }
+            $count = $n;
+        }
+
+        return $count;
     }
 
     /**

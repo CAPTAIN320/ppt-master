@@ -2,12 +2,12 @@
   "schema": 1,
   "name": "ppt-master",
   "displayName": "PPT Master",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "AI-powered presentation strategist and SVG-to-PPTX slide generator with Rakuten brand presets, Eight Confirmations workflow, and native editable PowerPoint export.",
   "author": "PPT Master Team",
   "sdk": "^1.0",
   "access": "authenticated",
-  "capabilities": ["ai", "storage", "http"],
+  "capabilities": ["ai"],
   "frontend": {
     "entry": "src/main.jsx"
   },

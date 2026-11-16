@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import { downloadBlob } from '@analyzer/integration-sdk';
 import { Alert, Spinner, SvgImg } from './common.jsx';
+import { renderClientDeterministicSvg } from '../utils/clientFallbackEngine.js';
 
 export function Viewer({ api, project, setProject, model, gallery }) {
-  const slides = project.slides || [];
+  const slides = Array.isArray(project?.slides) ? project.slides : [];
+  const svgMap = project?.svgs && typeof project.svgs === 'object' ? project.svgs : {};
   const [idx, setIdx] = useState(0);
   const [instr, setInstr] = useState('');
   const [src, setSrc] = useState('');
@@ -14,7 +16,7 @@ export function Viewer({ api, project, setProject, model, gallery }) {
 
   const cur = slides[Math.min(idx, Math.max(slides.length - 1, 0))];
   const n = cur ? cur.slide_number : 0;
-  const svg = project.svgs?.[String(n)] || '';
+  const svg = svgMap[String(n)] || '';
 
   useEffect(() => { setSrc(svg); setNotes(cur?.speaker_notes || ''); setError(''); setInfo(null); }, [n, svg, cur?.speaker_notes]);
 
@@ -25,15 +27,22 @@ export function Viewer({ api, project, setProject, model, gallery }) {
     try { await fn(); } catch (e) { setError(e?.message || 'Request failed'); } finally { setBusy(''); }
   }
   const regenerate = () => run('regen', async () => {
-    const r = await api.post('/executor/slide', {
-      project_id: project.id, slide_number: n, slide_plan: cur, eight_confirmations: project.eight_confirmations, design_spec: project.design_spec,
-      brand: project.brand, canvas_format: project.canvas_format, model, custom_instruction: instr,
-    });
-    setProject({ ...project, svgs: { ...project.svgs, [String(n)]: r.svg } });
+    let svgOut = '';
+    try {
+      const r = await api.post('/executor/slide', {
+        project_id: project.id, slide_number: n, slide_plan: cur, eight_confirmations: project.eight_confirmations, design_spec: project.design_spec,
+        brand: project.brand, canvas_format: project.canvas_format, topic: project.topic, model, custom_instruction: instr,
+      });
+      svgOut = r && typeof r.svg === 'string' ? r.svg : '';
+    } catch (e) {
+      setInfo({ valid: true, warnings: [`Server regeneration failed (${e?.message || 'error'}); rendered with the offline renderer.`] });
+    }
+    if (!svgOut.trim()) svgOut = renderClientDeterministicSvg(cur, project.design_spec, project.canvas_format, slides.length, project.topic);
+    setProject({ ...project, svgs: { ...svgMap, [String(n)]: svgOut } });
   });
   const validate = () => run('val', async () => {
     const r = await api.post('/svg/finalize', { project_id: project.id, slide_number: n, svg: src });
-    setProject({ ...project, svgs: { ...project.svgs, [String(n)]: r.svg || src } });
+    setProject({ ...project, svgs: { ...svgMap, [String(n)]: r.svg || src } });
     setInfo({ valid: r.valid, warnings: r.warnings || [] });
   });
   const saveNotes = () => run('notes', async () => {
@@ -45,7 +54,7 @@ export function Viewer({ api, project, setProject, model, gallery }) {
 
   const stage = (
     <div className="pptm-main">
-      <SvgImg svg={svg} format={project.canvas_format} alt={`Slide ${n}`} />
+      <SvgImg svg={svg} format={project?.canvas_format} alt={`Slide ${n}`} />
       <div className="aik-row aik-row--gap-2">
         <button type="button" className="aik-btn aik-btn--secondary aik-btn--sm" disabled={idx <= 0} onClick={() => setIdx(idx - 1)}>Previous</button>
         <span className="pptm-meta">Slide {idx + 1} of {slides.length} · {cur.title}</span>
@@ -91,7 +100,7 @@ export function Viewer({ api, project, setProject, model, gallery }) {
           <div className="pptm-gallery">
             {slides.map((s, i) => (
               <button type="button" key={s.slide_number} className="pptm-thumb" aria-current={i === idx} onClick={() => setIdx(i)}>
-                <SvgImg svg={project.svgs?.[String(s.slide_number)]} format={project.canvas_format} alt={`Slide ${s.slide_number}`} />
+                <SvgImg svg={svgMap[String(s.slide_number)]} format={project?.canvas_format} alt={`Slide ${s.slide_number}`} />
                 {s.slide_number}. {s.title}
               </button>
             ))}
@@ -104,7 +113,7 @@ export function Viewer({ api, project, setProject, model, gallery }) {
             <div className="pptm-film" aria-label="Slides">
               {slides.map((s, i) => (
                 <button type="button" key={s.slide_number} className="pptm-thumb" aria-current={i === idx} onClick={() => setIdx(i)}>
-                  <SvgImg svg={project.svgs?.[String(s.slide_number)]} format={project.canvas_format} alt={`Slide ${s.slide_number}`} />
+                  <SvgImg svg={svgMap[String(s.slide_number)]} format={project?.canvas_format} alt={`Slide ${s.slide_number}`} />
                   {s.slide_number}
                 </button>
               ))}

@@ -12,10 +12,56 @@ final class ProjectStore
 {
     private const INDEX = 'projects/index.json';
 
-    /** @return \Illuminate\Contracts\Filesystem\Filesystem */
+    /** @var array<string, array<string, mixed>> in-memory fallback used when the storage disk is unavailable */
+    private static array $memory = [];
+
+    /** @var list<array<string, mixed>>|null */
+    private static ?array $memoryIndex = null;
+
+    /** @return \Illuminate\Contracts\Filesystem\Filesystem|null  null when the host storage disk is unavailable */
     private function disk()
     {
-        return Integration::for(PromptRepository::INTEGRATION)->storage();
+        try {
+            return Integration::for(PromptRepository::INTEGRATION)->storage();
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    private static function encode(mixed $data): string
+    {
+        $json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR);
+
+        return $json === false ? '{}' : $json;
+    }
+
+    private function read(string $path): ?string
+    {
+        try {
+            $disk = $this->disk();
+            if ($disk === null || ! $disk->exists($path)) {
+                return null;
+            }
+            $raw = $disk->get($path);
+
+            return is_string($raw) ? $raw : null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    private function write(string $path, string $contents): bool
+    {
+        try {
+            $disk = $this->disk();
+            if ($disk === null) {
+                return false;
+            }
+
+            return $disk->put($path, $contents) !== false;
+        } catch (\Throwable $e) {
+            return false;
+        }
     }
 
     public static function newId(): string
@@ -31,19 +77,21 @@ final class ProjectStore
     /** @return list<array<string, mixed>> */
     private function readIndex(): array
     {
-        $disk = $this->disk();
-        if (! $disk->exists(self::INDEX)) {
-            return [];
+        $raw = $this->read(self::INDEX);
+        $data = $raw !== null ? json_decode($raw, true) : null;
+        if (is_array($data)) {
+            return array_values(array_filter($data, 'is_array'));
         }
-        $data = json_decode((string) $disk->get(self::INDEX), true);
 
-        return is_array($data) ? array_values(array_filter($data, 'is_array')) : [];
+        return self::$memoryIndex ?? [];
     }
 
     /** @param  list<array<string, mixed>>  $index */
     private function writeIndex(array $index): void
     {
-        $this->disk()->put(self::INDEX, json_encode(array_values($index), JSON_UNESCAPED_UNICODE));
+        $index = array_values($index);
+        self::$memoryIndex = $index;
+        $this->write(self::INDEX, self::encode($index));
     }
 
     /** @return array<string, mixed> */
@@ -90,13 +138,13 @@ final class ProjectStore
         }
         $this->seedIfEmpty();
         $path = 'projects/'.$id.'.json';
-        $disk = $this->disk();
-        if (! $disk->exists($path)) {
-            return null;
+        $raw = $this->read($path);
+        $data = $raw !== null ? json_decode($raw, true) : null;
+        if (is_array($data)) {
+            return $data;
         }
-        $data = json_decode((string) $disk->get($path), true);
 
-        return is_array($data) ? $data : null;
+        return self::$memory[$id] ?? null;
     }
 
     /**
@@ -117,10 +165,19 @@ final class ProjectStore
         $project['svgs'] = is_array($project['svgs'] ?? null) ? $project['svgs'] : [];
         $project['slides'] = is_array($project['slides'] ?? null) ? array_values($project['slides']) : [];
 
-        $this->disk()->put('projects/'.$id.'.json', json_encode($project, JSON_UNESCAPED_UNICODE));
-        $index = array_values(array_filter($this->readIndex(), static fn ($s) => ($s['id'] ?? '') !== $id));
-        $index[] = $this->summary($project);
-        $this->writeIndex($index);
+        $project['eight_confirmations'] = is_array($project['eight_confirmations'] ?? null) ? $project['eight_confirmations'] : [];
+        $project['design_spec'] = is_array($project['design_spec'] ?? null) ? $project['design_spec'] : [];
+
+        // Persistence is best-effort: a read-only / unavailable storage disk must never break planning.
+        self::$memory[$id] = $project;
+        try {
+            $this->write('projects/'.$id.'.json', self::encode($project));
+            $index = array_values(array_filter($this->readIndex(), static fn ($s) => ($s['id'] ?? '') !== $id));
+            $index[] = $this->summary($project);
+            $this->writeIndex($index);
+        } catch (\Throwable $e) {
+            // keep the in-memory copy
+        }
 
         return $project;
     }
@@ -154,10 +211,15 @@ final class ProjectStore
         if ($id === '') {
             return false;
         }
-        $disk = $this->disk();
         $path = 'projects/'.$id.'.json';
-        if ($disk->exists($path)) {
-            $disk->delete($path);
+        unset(self::$memory[$id]);
+        try {
+            $disk = $this->disk();
+            if ($disk !== null && $disk->exists($path)) {
+                $disk->delete($path);
+            }
+        } catch (\Throwable $e) {
+            // ignore storage failures
         }
         $this->writeIndex(array_values(array_filter($this->readIndex(), static fn ($s) => ($s['id'] ?? '') !== $id)));
 
@@ -168,10 +230,21 @@ final class ProjectStore
 
     private function seedIfEmpty(): void
     {
-        if ($this->seeding || $this->readIndex() !== []) {
+        if ($this->seeding || $this->disk() === null || $this->readIndex() !== []) {
             return;
         }
         $this->seeding = true;
+        try {
+            $this->seed();
+        } catch (\Throwable $e) {
+            // sample decks are optional
+        } finally {
+            $this->seeding = false;
+        }
+    }
+
+    private function seed(): void
+    {
         $prompts = new PromptRepository;
         $strategist = new StrategistService($prompts);
         $samples = [
@@ -206,6 +279,5 @@ final class ProjectStore
                 'svgs' => $svgs,
             ]);
         }
-        $this->seeding = false;
     }
 }

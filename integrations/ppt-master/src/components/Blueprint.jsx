@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, Progress, SvgImg, Spinner, PAGE_TYPES, LAYOUTS } from './common.jsx';
 
 const EIGHT = [
@@ -7,7 +7,7 @@ const EIGHT = [
 ];
 const COLORS = ['primary', 'secondary', 'accent', 'background', 'surface', 'text'];
 
-const metricsToText = (m) => (m || []).map((x) => `${x.label || ''} | ${x.value || ''} | ${x.trend || ''}`).join('\n');
+const metricsToText = (m) => (Array.isArray(m) ? m : []).map((x) => `${x?.label || ''} | ${x?.value || ''} | ${x?.trend || ''}`).join('\n');
 const textToMetrics = (t) => t.split('\n').filter((l) => l.trim()).map((l) => { const [label = '', value = '', trend = ''] = l.split('|').map((x) => x.trim()); return { label, value, trend }; });
 const hex6 = (c) => (/^#[0-9a-fA-F]{6}$/.test(c || '') ? c : '#000000');
 
@@ -16,6 +16,13 @@ function SlideRow({ s, i, total, onChange, onMove, onRemove }) {
   const [bulletsText, setBulletsText] = useState((s.bullets || []).join('\n'));
   const [metricsText, setMetricsText] = useState(metricsToText(s.metrics));
   const up = (patch) => onChange({ ...s, ...patch });
+  // S8: re-sync local text when the slide at this index changes (move / remove / external edit) so stale text is never written back.
+  const bulletsKey = (s.bullets || []).join('\n');
+  const metricsKey = metricsToText(s.metrics);
+  useEffect(() => {
+    setBulletsText((cur) => (cur.split('\n').filter((l) => l.trim()).join('\n') === bulletsKey ? cur : bulletsKey));
+    setMetricsText((cur) => (metricsToText(textToMetrics(cur)) === metricsKey ? cur : metricsKey));
+  }, [bulletsKey, metricsKey, s.slide_number, s.title]);
   return (
     <div className="pptm-slide">
       <div className="pptm-slide__head">
@@ -43,10 +50,11 @@ function SlideRow({ s, i, total, onChange, onMove, onRemove }) {
   );
 }
 
-export function Blueprint({ project, setProject, gen, onConfirm, onCancel, onSkip }) {
-  const ec = project.eight_confirmations || {};
-  const ds = project.design_spec || { colors: {}, fonts: {} };
-  const slides = project.slides || [];
+export function Blueprint({ project, setProject, gen: genIn, onConfirm, onCancel, onSkip }) {
+  const ec = project?.eight_confirmations || {};
+  const ds = { ...(project?.design_spec || {}), colors: project?.design_spec?.colors || {}, fonts: project?.design_spec?.fonts || {} };
+  const slides = Array.isArray(project?.slides) ? project.slides : [];
+  const gen = genIn || { running: false, done: false, current: 0, total: 0, errors: [], fatal: '', latestSvg: '' };
   const setEc = (k, v) => setProject({ ...project, eight_confirmations: { ...ec, [k]: v } });
   const setColor = (k, v) => setProject({ ...project, design_spec: { ...ds, colors: { ...ds.colors, [k]: v } } });
   const setFont = (k, v) => setProject({ ...project, design_spec: { ...ds, fonts: { ...ds.fonts, [k]: v } } });
@@ -60,7 +68,7 @@ export function Blueprint({ project, setProject, gen, onConfirm, onCancel, onSki
     <div className="aik-stack aik-stack--gap-3">
       <div className="aik-card aik-stack aik-stack--gap-3">
         <h2 className="aik-page__title" style={{ fontSize: 'var(--aik-font-size-lg)' }}>Step 2 · Eight Confirmations &amp; blueprint</h2>
-        <p className="aik-help">Review and edit the strategist's plan for “{project.topic}”.</p>
+        <p className="aik-help">Review and edit the strategist's plan for “{project?.topic || ''}”.</p>
         <div className="pptm-two">
           {EIGHT.map(([k, label]) => (
             <div className="aik-field" key={k}>
@@ -98,15 +106,15 @@ export function Blueprint({ project, setProject, gen, onConfirm, onCancel, onSki
         {!slides.length ? <div className="aik-empty"><p className="aik-empty__text">No slides in the plan. Add one to continue.</p></div> : null}
       </div>
 
-      {gen.running || gen.done || gen.errors.length ? (
+      {gen.running || gen.done || (gen.errors || []).length ? (
         <div className="aik-card aik-stack aik-stack--gap-2">
           <span className="aik-label">Generation {gen.running ? `· slide ${Math.min(gen.current + 1, gen.total)} of ${gen.total}` : ''}</span>
           <Progress value={gen.current} max={gen.total} />
           <div className="pptm-live">
-            <SvgImg svg={latest} format={project.canvas_format} alt="Latest generated slide" />
+            <SvgImg svg={latest} format={project?.canvas_format} alt="Latest generated slide" />
             <div className="aik-stack aik-stack--gap-1">
               {gen.running ? <Spinner label="Generating slides…" /> : null}
-              {gen.errors.map((e, i) => <Alert key={i} error={e} title="Slide failed" />)}
+              {(gen.errors || []).map((e, i) => <Alert key={i} error={e} title="Slide failed" />)}
             </div>
           </div>
         </div>
@@ -119,7 +127,7 @@ export function Blueprint({ project, setProject, gen, onConfirm, onCancel, onSki
         ) : (
           <button type="button" className="aik-btn aik-btn--primary" disabled={!slides.length} onClick={onConfirm}>Confirm &amp; generate all slides</button>
         )}
-        {!gen.running && Object.keys(project.svgs || {}).length ? <button type="button" className="aik-btn aik-btn--secondary" onClick={onSkip}>View generated slides</button> : null}
+        {!gen.running && Object.keys(project?.svgs || {}).length ? <button type="button" className="aik-btn aik-btn--secondary" onClick={onSkip}>View generated slides</button> : null}
       </div>
     </div>
   );

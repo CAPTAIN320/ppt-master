@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { Alert, Spinner, Switch, DEFAULT_CANVASES, STRUCTURE_MODES } from './common.jsx';
+import { FALLBACK_BRANDS } from '../utils/clientFallbackEngine.js';
 
-export function Brief({ config, form, setForm, onPlan, busy, error }) {
+export function Brief({ config, form, setForm, onPlan, busy }) {
   const [fileErr, setFileErr] = useState('');
-  const brands = config?.brands || [];
-  const canvases = config?.canvasFormats?.length ? config.canvasFormats : DEFAULT_CANVASES;
+  const brands = Array.isArray(config?.brands) && config.brands.length ? config.brands : FALLBACK_BRANDS;
+  const canvases = Array.isArray(config?.canvasFormats) && config.canvasFormats.length ? config.canvasFormats : DEFAULT_CANVASES;
   const set = (k, v) => setForm({ ...form, [k]: v });
 
   function onFile(e) {
@@ -69,9 +70,8 @@ export function Brief({ config, form, setForm, onPlan, busy, error }) {
         <Switch on={form.auto_confirm} onChange={(v) => set('auto_confirm', v)}>Auto-confirm (skip review and generate all slides)</Switch>
       </div>
 
-      <Alert error={error} title="Could not plan presentation" />
       <div className="aik-row aik-row--gap-2">
-        <button type="button" className={`aik-btn aik-btn--primary${busy ? ' aik-btn--loading' : ''}`} disabled={busy || !form.topic.trim()} onClick={onPlan}>Plan presentation</button>
+        <button type="button" className={`aik-btn aik-btn--primary${busy ? ' aik-btn--loading' : ''}`} disabled={busy || !String(form.topic || '').trim()} onClick={onPlan}>Plan presentation</button>
         {busy ? <Spinner label="Planning…" /> : null}
       </div>
     </div>
