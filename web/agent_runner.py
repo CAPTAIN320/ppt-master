@@ -47,9 +47,9 @@ _BRAND_PATHS: dict[str, str] = {
 # ── Context-history compaction ────────────────────────────────────────────────
 
 _REF_MARKERS = (
-    "/skills/ppt-master/references/",
-    "/skills/ppt-master/workflows/",
-    "/skills/ppt-master/templates/",
+    "skills/ppt-master/references/",
+    "skills/ppt-master/workflows/",
+    "skills/ppt-master/templates/",
 )
 _COMPACT_MIN_LEN = 3000
 _COMPACTED_PREFIX = "[compacted"
@@ -90,7 +90,12 @@ def _is_reference_path(path: str) -> bool:
     if any(mk in p for mk in _REF_MARKERS):
         return True
     base = Path(p).name
-    return base in ("strategist.md", "executor-base.md", "shared-standards.md") or base.startswith("image-") or "/modes/" in p or "/visual-styles/" in p
+    return (
+        base in ("strategist.md", "executor-base.md", "shared-standards.md")
+        or ("references/" in p and base.startswith("image-"))
+        or "/modes/" in p
+        or "/visual-styles/" in p
+    )
 
 
 def _compact_history(messages: list[dict[str, Any]], project_path: str | None, model: str) -> int:

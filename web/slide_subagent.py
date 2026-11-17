@@ -716,8 +716,8 @@ async def generate_slides_batch(args: dict[str, Any], *, job_id: str, store: Any
         return {"status": "failed", "error": "design_spec.md/spec_lock.md missing - finish Step 4 first"}
 
     outline = parse_outline(await asyncio.to_thread(_read, project / "design_spec.md"))
-    raw_nums = args.get("slide_numbers", "all")
-    if raw_nums == "all" or raw_nums is None:
+    raw_nums = args.get("slide_numbers")
+    if raw_nums in (None, "all", []):
         nums = sorted(outline)
         if not nums:
             return {"status": "failed", "error": "no '#### Slide NN' blocks found in design_spec.md §IX; pass explicit slide_numbers"}
@@ -725,7 +725,7 @@ async def generate_slides_batch(args: dict[str, Any], *, job_id: str, store: Any
         try:
             nums = sorted({int(x) for x in raw_nums})
         except (TypeError, ValueError):
-            return {"status": "failed", "error": "slide_numbers must be 'all' or a list of integers"}
+            return {"status": "failed", "error": "slide_numbers must be a list of integers (or [] / omitted for all)"}
 
     try:
         max_conc = max(1, min(int(args.get("max_concurrency", 3) or 3), 6))

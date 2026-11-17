@@ -24,7 +24,7 @@ _SLIDE_RULE_LEGACY = "After writing each SVG slide file, call the slide_ready to
 _SLIDE_RULE_SUBAGENT = """\
 SLIDE GENERATION (Step 6 override for web mode):
 - Do NOT read executor-base.md, shared-standards.md, modes/*.md or visual-styles/*.md, and do NOT write slide SVGs with write_file.
-- After Step 4 (spec confirmed) and Step 5 (images) finish, call generate_slides_batch(project_path, slide_numbers="all", max_concurrency=3).
+- After Step 4 (spec confirmed) and Step 5 (images) finish, call generate_slides_batch(project_path, slide_numbers=[], max_concurrency=3).
   Use generate_slide_svg only to regenerate or repair a single page (pass extra_instructions). Both tools write svg_output/,
   run the quality check, write speaker notes, and notify the UI (slide_ready) automatically - do not call slide_ready for those pages.
 - If a result lists failed slides, call generate_slide_svg for each. When all slides exist, run svg_quality_checker.py once on the project,
@@ -40,7 +40,7 @@ GATE: Step 4 (and Step 5 if triggered) complete; all prerequisite deliverables a
 In web mode the Executor runs as isolated per-slide sub-agents exposed as tools. Do NOT read executor-base.md / shared-standards.md /
 modes/ / visual-styles/ yourself and do NOT write SVG files with write_file.
 
-1. Call `generate_slides_batch(project_path, slide_numbers="all", max_concurrency=3)`. Each slide is generated in its own context from
+1. Call `generate_slides_batch(project_path, slide_numbers=[], max_concurrency=3)`. Each slide is generated in its own context from
    design_spec.md + spec_lock.md, quality-checked, self-corrected once, given speaker notes (notes/<stem>.md, and notes/total.md when complete),
    and announced to the UI automatically.
 2. For any slide listed under `failed` (or to apply user feedback), call `generate_slide_svg(project_path, slide_number, extra_instructions=...)`.

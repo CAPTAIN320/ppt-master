@@ -266,9 +266,14 @@ def test_batch_partial_failure_all():
         store = FakeStore()
         client = FakeClient([RuntimeError("boom")] + [(GOOD_SVG, "stop")] * 20)
         ctx = ToolContext(client=client, model="claude-test")
-        res = _run(ss.generate_slides_batch({"project_path": str(proj), "slide_numbers": "all", "max_concurrency": 6, "with_notes": False}, job_id="j", store=store, ctx=ctx))
+        res = _run(ss.generate_slides_batch({"project_path": str(proj), "slide_numbers": [], "max_concurrency": 6, "with_notes": False}, job_id="j", store=store, ctx=ctx))
         assert res["status"] == "partial" and len(res["failed"]) == 1 and len(res["generated"]) == 13, res
         assert res["notes_total"] is False
+        # "all" and omitted slide_numbers also mean all slides (skipped since 13/14 exist)
+        client2 = FakeClient([(GOOD_SVG, "stop")])
+        ctx2 = ToolContext(client=client2, model="claude-test")
+        res2 = _run(ss.generate_slides_batch({"project_path": str(proj), "with_notes": False}, job_id="j", store=store, ctx=ctx2))
+        assert res2["status"] == "ok" and len(res2["generated"]) == 1 and len(res2["skipped"]) == 13
 
 
 # ── llm_utils ─────────────────────────────────────────────────────────────────
@@ -324,8 +329,22 @@ def test_cancel_during_call():
 
 
 def test_tool_registration_and_flag():
-    names = [t["function"]["name"] for t in get_tool_definitions()]
+    defs = get_tool_definitions()
+    names = [t["function"]["name"] for t in defs]
     assert "generate_slide_svg" in names and "generate_slides_batch" in names
+    # Gemini schema compatibility: no oneOf / additionalProperties / default / minimum / maximum
+    raw_schema = json.dumps(defs)
+    for banned_kw in ('"oneOf"', '"additionalProperties"', '"default"', '"minimum"', '"maximum"'):
+        assert banned_kw not in raw_schema, f"Gemini-incompatible keyword in tool schemas: {banned_kw}"
+    # write_file of design_spec.md / spec_lock.md sets store.project_path immediately
+    with tempfile.TemporaryDirectory() as t:
+        st = FakeStore()
+        spec_p = Path(t) / "proj" / "design_spec.md"
+        _run(dispatch_tool("write_file", {"path": str(spec_p), "content": "# spec"}, "j", st))
+        assert st.project_path == str(spec_p.parent)
+    assert agent_runner._is_reference_path("skills/ppt-master/templates/foo.svg")
+    assert agent_runner._is_reference_path("/app/skills/ppt-master/references/image-guide.md")
+    assert not agent_runner._is_reference_path("/app/projects/x/sources/image-notes.md")
     os.environ["SLIDE_SUBAGENT"] = "0"
     try:
         names = [t["function"]["name"] for t in get_tool_definitions()]

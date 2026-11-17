@@ -199,10 +199,10 @@ SLIDE_TOOL_DEFINITIONS: list[dict] = [
                 "type": "object",
                 "properties": {
                     "project_path": {"type": "string", "description": "Project dir, e.g. /app/projects/foo_ppt169_20261117"},
-                    "slide_number": {"type": "integer", "minimum": 1, "description": "1-based page number matching '#### Slide NN' in design_spec.md §IX"},
+                    "slide_number": {"type": "integer", "description": "1-based page number matching '#### Slide NN' in design_spec.md §IX"},
                     "filename": {"type": "string", "description": "Optional explicit '<NN>_<slug>.svg'. Default: derived from the §IX page name."},
                     "extra_instructions": {"type": "string", "description": "Optional (<=800 chars): user feedback / fix request for this slide (e.g. regeneration after review)."},
-                    "with_notes": {"type": "boolean", "default": True},
+                    "with_notes": {"type": "boolean", "description": "Whether to generate speaker notes (default: true)."},
                     "title": {"type": "string", "description": "Optional fallback title when design_spec.md §IX has no matching '#### Slide NN' block."},
                     "slide_spec": {"type": "string", "description": "Optional inline brief for this slide, used only when §IX has no matching block."},
                 },
@@ -223,24 +223,21 @@ SLIDE_TOOL_DEFINITIONS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "project_path": {"type": "string"},
+                    "project_path": {"type": "string", "description": "Project dir, e.g. /app/projects/foo_ppt169_20261117"},
                     "slide_numbers": {
-                        "description": "Array of 1-based slide numbers, or the string 'all' (every '#### Slide NN' in §IX)",
-                        "oneOf": [
-                            {"type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 1},
-                            {"type": "string", "enum": ["all"]},
-                        ],
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "1-based slide numbers to generate. Pass an empty array [] (or omit) to generate ALL slides in design_spec.md §IX.",
                     },
-                    "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 6, "default": 3},
-                    "overwrite": {"type": "boolean", "default": False, "description": "Regenerate slides whose SVG already exists (default: skip -> idempotent resume)."},
+                    "max_concurrency": {"type": "integer", "description": "Maximum parallel slide sub-agents, 1 to 6 (default: 3)."},
+                    "overwrite": {"type": "boolean", "description": "Regenerate slides whose SVG already exists (default: false — skip for idempotent resume)."},
                     "extra_instructions": {
                         "type": "object",
-                        "additionalProperties": {"type": "string"},
-                        "description": "Optional map slide_number(as string) -> per-slide extra instructions.",
+                        "description": "Optional map of slide_number (as string, e.g. '3') to extra instructions string.",
                     },
-                    "with_notes": {"type": "boolean", "default": True},
+                    "with_notes": {"type": "boolean", "description": "Whether to generate speaker notes (default: true)."},
                 },
-                "required": ["project_path", "slide_numbers"],
+                "required": ["project_path"],
             },
         },
     },
@@ -287,10 +284,12 @@ async def dispatch_tool(
         p = _resolve_path(args["path"])
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(args["content"], encoding="utf-8")
-        # If this looks like an SVG output, update the project path hint
+        # If this looks like an SVG output or project spec, update the project path hint
         if "svg_output" in str(p) or "svg_final" in str(p):
             project_path = str(p.parent.parent)
             store.set_project_path(job_id, project_path)
+        elif p.name in ("design_spec.md", "spec_lock.md"):
+            store.set_project_path(job_id, str(p.parent))
         return {"written": str(p), "bytes": len(args["content"].encode())}
 
     elif name == "list_dir":
