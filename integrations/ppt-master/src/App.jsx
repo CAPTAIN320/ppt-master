@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { utf8ToBase64 } from '@analyzer/integration-sdk';
 import { Alert } from './components/common.jsx';
 import { Brief } from './components/Brief.jsx';
 import { Blueprint } from './components/Blueprint.jsx';
@@ -32,12 +33,58 @@ function checkResponse(res) {
   return r;
 }
 
-export function safeApi(raw) {
+function joinUrl(base, path) {
+  const b = String(base || '').replace(/\/+$/, '');
+  const p = String(path || '').replace(/^\/+/, '');
+  return p ? `${b}/${p}` : b;
+}
+
+/**
+ * POST `{payload: base64(json)}` (unsalted — the shape both the host DecodeEncodedPayload middleware and
+ * PptMasterController::decoded() understand). The SDK's salted `{v,p}` envelope is rejected by the host gateway.
+ */
+async function sendPost(ctx, path, body, useEncryptHeader) {
+  const url = joinUrl(ctx?.apiBase || '', path);
+  const headers = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    'X-Requested-With': 'XMLHttpRequest',
+  };
+  if (useEncryptHeader) headers.encrypt = 'true';
+  if (ctx?.csrfToken) headers['X-CSRF-TOKEN'] = ctx.csrfToken;
+  const encoded = utf8ToBase64(JSON.stringify(body ?? {}));
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    credentials: 'same-origin',
+    body: JSON.stringify({ payload: encoded }),
+  });
+  const text = await res.text();
+  let data = null;
+  if (text !== '') {
+    try { data = JSON.parse(text); } catch { data = text; }
+  }
+  if (!res.ok) {
+    const msg = (data && typeof data === 'object' && (data.message || (data.error && data.error.message) || data.error)) || res.statusText || 'Request failed';
+    throw new Error(String(msg));
+  }
+  return data;
+}
+
+export function safeApi(raw, ctx) {
   const wrapCall = (fn) => async (...args) => checkResponse(await fn(...args));
+  const post = async (path, body) => {
+    // Attempt 1: encrypt header + unsalted payload. Attempt 2 (on block page / empty body): no encrypt header.
+    let r = await sendPost(ctx, path, body, true);
+    if (typeof r === 'string' || r === null || r === undefined) {
+      r = await sendPost(ctx, path, body, false);
+    }
+    return r;
+  };
   return {
     ...raw,
     get: wrapCall((...a) => raw.get(...a)),
-    post: wrapCall((...a) => raw.post(...a)),
+    post: wrapCall(post),
     ...(typeof raw.postForm === 'function' ? { postForm: wrapCall((...a) => raw.postForm(...a)) } : {}),
   };
 }
@@ -54,7 +101,7 @@ function extractProject(r) {
 }
 
 export function App({ api: rawApi, ctx }) {
-  const api = useMemo(() => safeApi(rawApi), [rawApi]);
+  const api = useMemo(() => safeApi(rawApi, ctx), [rawApi, ctx]);
   const [config, setConfig] = useState(FALLBACK_CONFIG);
   const [notice, setNotice] = useState('');
   const [cfgErr, setCfgErr] = useState('');

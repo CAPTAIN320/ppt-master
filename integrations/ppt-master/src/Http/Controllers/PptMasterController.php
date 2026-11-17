@@ -23,18 +23,39 @@ class PptMasterController
     {
         try {
             $all = $request->all();
-            if ($all === [] && trim((string) $request->getContent()) !== '') {
-                $raw = json_decode((string) $request->getContent(), true);
-                if (is_array($raw)) {
-                    $all = $raw;
-                    $request->replace($raw);
+            $isEnvelope = static function ($a): bool {
+                if (! is_array($a) || $a === []) {
+                    return false;
+                }
+                $k = array_keys($a);
+
+                return (isset($a['payload']) && is_string($a['payload']) && array_diff($k, ['payload']) === [])
+                    || (isset($a['p']) && is_string($a['p']) && array_diff($k, ['v', 'p']) === []);
+            };
+            if ($all === [] || $isEnvelope($all) === false) {
+                // Body may not have been parsed into $request->all() (content-type quirks, query-only input).
+                $candidates = [];
+                try {
+                    $candidates[] = $request->json()->all();
+                } catch (\Throwable $e) {
+                    // ignore
+                }
+                $content = trim((string) $request->getContent());
+                if ($content !== '') {
+                    $candidates[] = json_decode($content, true);
+                }
+                foreach ($candidates as $cand) {
+                    if (is_array($cand) && $cand !== [] && ($all === [] || $isEnvelope($cand))) {
+                        $all = $cand;
+                        $request->replace($cand);
+                        break;
+                    }
                 }
             }
-            $keys = array_keys($all);
             $enc = null;
-            if (isset($all['p']) && is_string($all['p']) && array_key_exists('v', $all) && array_diff($keys, ['v', 'p']) === []) {
+            if (isset($all['p']) && is_string($all['p']) && array_diff(array_keys($all), ['v', 'p']) === []) {
                 $enc = $all['p'];
-            } elseif (isset($all['payload']) && is_string($all['payload']) && array_diff($keys, ['payload']) === []) {
+            } elseif (isset($all['payload']) && is_string($all['payload']) && array_diff(array_keys($all), ['payload']) === []) {
                 $enc = $all['payload'];
             }
             if ($enc === null || trim($enc) === '') {

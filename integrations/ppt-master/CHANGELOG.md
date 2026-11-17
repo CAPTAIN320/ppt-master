@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.3
+- Fix "Unexpected non-JSON response from the server" on gateways that block the SDK's salted `{v,p}` POST envelope: POSTs now send `{payload: base64(json)}` (unsalted) with the `encrypt` header, and automatically retry without the header when a block page / empty body comes back.
+- Backend `decoded()` also reads `$request->json()` / raw body when `$request->all()` is empty or not an envelope.
+
 ## 1.0.2
 - Fix AI calls failing on Azure AI reasoning models (gpt-5.6-luna/sol/terra, gpt-6.1-sol): `temperature` is no longer sent; on error the call retries once with only `model`.
 - Manifest aligned with reference integrations: `access: developer`, sidebar icon `FileText`.
