@@ -11,9 +11,12 @@ executes the full serial pipeline:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
+import re
+import shutil
 import time
 import traceback
 from pathlib import Path
@@ -175,6 +178,12 @@ def _compact_history(messages: list[dict[str, Any]], project_path: str | None, m
                 if should:
                     reason = "superseded by a later read" if (superseded and not is_ref) else "read earlier; call read_file again if needed"
                     new = json.dumps({"path": path, "content": f"[compacted: {len(content)} chars of {base} — {reason}]", "compacted": True})
+            elif name == "list_dir":
+                try:
+                    n = len(json.loads(content).get("entries", []))
+                except Exception:
+                    n = -1
+                new = json.dumps({"compacted": True, "path": a.get("path", ""), "note": f"[compacted list_dir: {n} entries; call list_dir again with pattern= if needed]"})
             elif name in ("run_script", "web_fetch") and len(content) > 6000:
                 new = content[:1500] + f"\n…[compacted {len(content) - 3000} chars]…\n" + content[-1500:]
                 new = json.dumps({"compacted": True, "output": new})
@@ -289,6 +298,109 @@ def _fallback_project_path(since: float) -> str | None:
     return str(candidates[0][1])
 
 
+_CANVAS_VIEWBOX: dict[str, str] = {
+    "ppt169": "0 0 1280 720",
+    "ppt43": "0 0 1024 768",
+}
+
+
+def _slugify_topic(topic: str, max_len: int = 40) -> str:
+    s = re.sub(r"[^\w]+", "_", (topic or "").strip().lower(), flags=re.UNICODE).strip("_")
+    return s[:max_len].strip("_") or "deck"
+
+
+async def _run_cli(job_id: str, store: JobStore, *argv: str) -> tuple[int, str]:
+    """Run ``python3 <argv...>`` from REPO_ROOT, log a short tail, return (rc, output)."""
+    cmd = ["python3", *argv]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        cwd=str(REPO_ROOT),
+        env={**os.environ},
+    )
+    out, _ = await proc.communicate()
+    text = out.decode(errors="replace")
+    await store.append_log(job_id, f"\n$ {' '.join(cmd)}\n{text[-800:]}\n")
+    return proc.returncode or 0, text
+
+
+async def _preinit_project(
+    job_id: str,
+    topic: str,
+    canvas_format: str,
+    uploaded_files: list[dict],
+    theme: str,
+    store: JobStore,
+) -> dict | None:
+    """SKILL.md Step 2 (init/import) + Step 3 (brand template) done in Python.
+
+    Returns a dict describing the project, or None to fall back to the legacy prompt.
+    """
+    pm = "skills/ppt-master/scripts/project_manager.py"
+    name = _slugify_topic(topic)
+    rc, out = await _run_cli(job_id, store, pm, "init", name, "--format", canvas_format, "--dir", str(PROJECTS_DIR))
+    if rc != 0 and "already exists" in out:  # same-day re-run of the same topic
+        name = f"{name}_{job_id[:6]}"
+        rc, out = await _run_cli(job_id, store, pm, "init", name, "--format", canvas_format, "--dir", str(PROJECTS_DIR))
+    m = re.search(r"Project created:\s*(\S.*)", out)
+    if rc != 0 or not m:
+        return None  # unsupported canvas etc. -> legacy path
+    project = Path(m.group(1).strip())
+    store.set_project_path(job_id, str(project))
+
+    # Brand template == SKILL.md Step 3 'brand' dispatch, done here (no agent turns)
+    brand_applied = False
+    if theme in _BRAND_PATHS:
+        src = REPO_ROOT / _BRAND_PATHS[theme]
+        if src.is_dir():
+            shutil.copytree(src, project / "templates", dirs_exist_ok=True)
+            (project / "images").mkdir(exist_ok=True)
+            for f in list((project / "templates").rglob("*")):
+                if f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
+                    shutil.move(str(f), str(project / "images" / f.name))
+            brand_applied = (project / "templates" / "design_spec.md").is_file()
+
+    # Uploads -> sources/ with --copy (NOT --move): _build_user_message still reads the
+    # uploaded image bytes from uploaded_files[].path for the multimodal blocks.
+    if uploaded_files:
+        await _run_cli(job_id, store, pm, "import-sources", str(project), *[f["path"] for f in uploaded_files], "--copy")
+    src_dir = project / "sources"
+    sources = sorted(p.name for p in src_dir.iterdir() if p.is_file()) if src_dir.is_dir() else []
+    return {"path": str(project), "canvas": canvas_format, "brand": brand_applied, "sources": sources}
+
+
+def _project_block(project: dict) -> str:
+    canvas = project.get("canvas", "")
+    viewbox = _CANVAS_VIEWBOX.get(canvas, "see spec_lock.md canvas.viewBox")
+    pp = project["path"]
+    sources = project.get("sources") or []
+    sources_s = ", ".join(sources) if sources else f"(empty - topic-only; write research notes to {pp}/sources/<slug>.md if useful)"
+    brand_s = (
+        "applied: templates/design_spec.md (kind: brand) is the locked identity - read it ONCE at Step 4"
+        if project.get("brand")
+        else "none (free design)"
+    )
+    return (
+        "PROJECT ALREADY INITIALIZED — SKILL.md Step 2 (init/import) and Step 3 (template) are DONE.\n"
+        "Do NOT run project_manager.py, do NOT list_dir/read skills/ppt-master/templates/brands/*, do NOT copy brand files.\n"
+        f"  project_path = {pp}\n"
+        f"  canvas       = {canvas} (viewBox {viewbox})\n"
+        f"  sources/     = {sources_s}\n"
+        f"  brand        = {brand_s}\n"
+        "Path rules: use absolute /app/... paths. (/projects/... is auto-mapped to /app/projects/... but never write outside <project_path>.)\n"
+        "Command cheat-sheet (run_script, script path relative to /app, args as array):\n"
+        '  icons   : skills/ppt-master/scripts/icon_sync.py  [<project_path>, "tabler-outline/chart-bar", "tabler-outline/users", ...]  '
+        "# guess common Tabler names; unknown ones are reported -> re-pick. To search use list_dir(path=\".../icons/tabler-outline\", pattern=\"chart\"); NEVER list a whole icon library.\n"
+        "  images  : skills/ppt-master/scripts/analyze_images.py [<project_path>/images]   (only if images/ has files)\n"
+        '  gen img : skills/ppt-master/scripts/image_gen.py ["--manifest", "<project_path>/images/image_prompts.json"]   (only if confirmed image_usage includes ai)\n'
+        "  qc      : skills/ppt-master/scripts/svg_quality_checker.py [<project_path>]\n"
+        "  finalize: skills/ppt-master/scripts/finalize_svg.py [<project_path>]\n"
+        "Start now: read references/strategist.md + templates/design_spec_reference.md -> confirm_gate -> "
+        "write design_spec.md + spec_lock.md -> icon_sync -> (images) -> generate_slides_batch."
+    )
+
+
 def _slide_ready_hint() -> str:
     if slide_subagent_enabled():
         return (
@@ -306,11 +418,14 @@ def _build_user_message(
     theme: str = "none",
     slide_count_pref: str = "",
     image_usage_pref: str = "",
+    project: dict | None = None,
 ) -> str | list:
     """Build the initial user message for the agent."""
     parts = []
 
-    if uploaded_files:
+    if project:
+        parts.append(_project_block(project))
+    elif uploaded_files:
         file_list = "\n".join(f"  - {f['path']} ({f['type']})" for f in uploaded_files)
         parts.append(f"Source files have been uploaded to /app/projects/uploads/:\n{file_list}")
 
@@ -324,7 +439,7 @@ def _build_user_message(
         f"PPTX export is handled on demand by the server when the user clicks Download."
     )
 
-    if theme != "none" and theme in _BRAND_PATHS:
+    if theme != "none" and theme in _BRAND_PATHS and not project:
         parts.append(
             f"Brand template path: {_BRAND_PATHS[theme]}\n"
             f"Apply this brand at SKILL.md Step 3 using the explicit path above."
@@ -405,13 +520,6 @@ async def run_job(
     )
 
     system_prompt = get_system_prompt()
-    user_message = _build_user_message(topic, canvas_format, model, uploaded_files, theme, slide_count_pref, image_usage_pref)
-
-    messages: list[dict[str, Any]] = [
-        {"role": "user", "content": get_skill_md()},
-        {"role": "assistant", "content": "I have read the SKILL.md pipeline. I am ready to begin."},
-        {"role": "user", "content": user_message},
-    ]
 
     store.set_status(job_id, "running")
     await store.append_log(job_id, f"[Agent] Starting job: {topic}\n")
@@ -422,8 +530,29 @@ async def run_job(
     await store.append_log(job_id, f"[Agent] Base URL: {agent_base_url}\n")
     await store.append_log(job_id, f"[Agent] API key prefix: {agent_api_key[:12]}...\n\n")
 
+    project_info: dict | None = None
+    try:
+        project_info = await _preinit_project(job_id, topic, canvas_format, uploaded_files, theme, store)
+        if project_info:
+            await store.append_log(job_id, f"[Agent] Project pre-initialized: {project_info['path']}\n")
+        else:
+            await store.append_log(job_id, "[Agent] Project pre-init unavailable; falling back to agent-driven init\n")
+    except Exception as exc:  # noqa: BLE001
+        project_info = None
+        await store.append_log(job_id, f"[Agent] Project pre-init failed: {exc}\n")
+
+    user_message = _build_user_message(
+        topic, canvas_format, model, uploaded_files, theme, slide_count_pref, image_usage_pref, project=project_info
+    )
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": get_skill_md()},
+        {"role": "assistant", "content": "I have read the SKILL.md pipeline. I am ready to begin."},
+        {"role": "user", "content": user_message},
+    ]
+
     max_iterations = 200  # safety cap
     iteration = 0
+    # Taken AFTER pre-init so files created by pre-init don't count as pipeline progress.
     job_start_ts = time.time()
     stall_count = 0  # consecutive non-productive turns (fix plan Step 4)
     last_retry_cause: str | None = None  # "truncation" | "no_progress" | "unexpected"

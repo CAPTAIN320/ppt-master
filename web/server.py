@@ -35,7 +35,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .agent_runner import run_job
-from .job_store import JobStore
+from .job_store import JobStore, log_event_is_stale
 
 app = FastAPI(title="PPT Master", version="1.0.0")
 
@@ -221,7 +221,9 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
         return
 
     # Send existing log first (catch-up for reconnects)
+    snapshot_len = 0
     if job["log"]:
+        snapshot_len = len(job["log"])  # take len BEFORE the await below
         await websocket.send_text(json.dumps({"type": "log", "text": job["log"]}))
 
     # Stream new events
@@ -233,6 +235,9 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
                 current = store.get_job(job_id)
                 if current and current["status"] in ("done", "error"):
                     break
+                continue
+            # Skip log events already contained in the snapshot (fixes duplicate initial lines)
+            if log_event_is_stale(event, snapshot_len):
                 continue
             # Track slide count for the Library tab
             if event.get("type") == "slide_ready" and not event.get("regenerated"):

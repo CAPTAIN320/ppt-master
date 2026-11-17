@@ -78,6 +78,18 @@ _cancel_events: dict[str, asyncio.Event] = {}
 # Per-job log queues for WebSocket streaming
 _log_queues: dict[str, asyncio.Queue] = {}
 
+# Per-job count of chars appended to the DB log by this process (offset stamp for log events)
+_log_len: dict[str, int] = {}
+
+
+def log_event_is_stale(event: dict, snapshot_len: int) -> bool:
+    """True if a queued log event is already contained in a DB log snapshot of ``snapshot_len`` chars."""
+    return bool(
+        event.get("type") == "log"
+        and event.get("end") is not None
+        and event["end"] <= snapshot_len
+    )
+
 
 class JobStore:
     def create_job(self, topic: str = "", model: str = "") -> str:
@@ -92,6 +104,7 @@ class JobStore:
         _confirm_events[job_id] = asyncio.Event()
         _cancel_events[job_id] = asyncio.Event()
         _log_queues[job_id] = asyncio.Queue()
+        _log_len[job_id] = 0
         return job_id
 
     def get_job(self, job_id: str) -> Optional[dict]:
@@ -332,8 +345,11 @@ class JobStore:
                 (text, now, job_id),
             )
             conn.commit()
+        # No await between the DB write and the counter update -> atomic w.r.t. the event loop.
+        end = _log_len.get(job_id, 0) + len(text)
+        _log_len[job_id] = end
         if job_id in _log_queues:
-            await _log_queues[job_id].put({"type": "log", "text": text})
+            await _log_queues[job_id].put({"type": "log", "text": text, "end": end})
 
     async def push_event(self, job_id: str, event: dict) -> None:
         """Push a structured event to the WebSocket queue."""
@@ -404,3 +420,4 @@ class JobStore:
         _confirm_events.pop(job_id, None)
         _cancel_events.pop(job_id, None)
         _log_queues.pop(job_id, None)
+        _log_len.pop(job_id, None)

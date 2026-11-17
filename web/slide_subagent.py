@@ -33,6 +33,12 @@ PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 MAX_PROMPT_CHARS = 180_000
 MAX_DESIGN_SPEC_CHARS = 40_000
+DEFAULT_CONCURRENCY = 4
+
+
+def compact_prompt_enabled() -> bool:
+    """Feature flag: compact executor system prompt (default ON)."""
+    return os.environ.get("SLIDE_COMPACT_PROMPT", "1").lower() not in ("0", "false", "no")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Markdown helpers
@@ -255,12 +261,13 @@ def _excerpt_svg(text: str, cap: int) -> str:
     return text[:head] + "\n<!-- …truncated -->\n" + text[-tail:]
 
 
-def style_anchors(project_path: str | Path, exclude_filename: str | None = None, max_n: int = 2, cap: int = 6000) -> list[tuple[str, str]]:
-    """Up to ``max_n`` already-generated slides (cover + first content slide) as trimmed excerpts."""
+def style_anchors(project_path: str | Path, exclude_filename: str | None = None, max_n: int = 1, cap: int = 3500) -> list[tuple[str, str]]:
+    """Up to ``max_n`` already-generated slides as trimmed excerpts (prefers non-cover pages)."""
     svg_dir = Path(project_path) / "svg_output"
     if not svg_dir.is_dir():
         return []
     files = [p for p in sorted(svg_dir.glob("*.svg")) if p.name != exclude_filename]
+    files = [p for p in files if not p.name.startswith("01_")] or files
     out: list[tuple[str, str]] = []
     for p in files[:max_n]:
         t = _read(p)
@@ -281,11 +288,12 @@ def _clean_ref(value: str) -> str:
     return re.sub(r"\s+#.*$", "", value.strip().strip("`'\"")).strip()
 
 
-def _trim_design_spec(text: str, cap: int = MAX_DESIGN_SPEC_CHARS, drop_tail: bool = False) -> str:
+def _trim_design_spec(text: str, cap: int = MAX_DESIGN_SPEC_CHARS, drop_tail: bool = False, drop_outline: bool = False) -> str:
     out = text
-    if drop_tail or len(out) > cap:
+    if drop_tail or drop_outline or len(out) > cap:
         parts = _split_sections(out)
-        kept = [b for h, b in parts if not re.match(r"##\s+(X|XI)\.", h)]
+        tail_re = r"##\s+(IX|X|XI)\." if drop_outline else r"##\s+(X|XI)\."
+        kept = [b for h, b in parts if not re.match(tail_re, h)]
         out = "".join(kept)
     if len(out) > cap:
         out = out[:cap] + "\n\n<!-- design_spec.md truncated for size -->\n"
@@ -297,7 +305,33 @@ def _trim_design_spec(text: str, cap: int = MAX_DESIGN_SPEC_CHARS, drop_tail: bo
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _mode_style_parts(lock_info: dict[str, Any]) -> list[str]:
+    refs = SKILL_DIR / "references"
+    parts: list[str] = []
+    mode = _safe_token(lock_info.get("mode", ""))
+    if mode and mode != "custom":
+        t = _read(refs / "modes" / f"{mode}.md")
+        if t:
+            parts.append(f"# Mode: {mode}\n\n{t}")
+    style = _safe_token(lock_info.get("visual_style", ""))
+    if style and style != "custom":
+        t = _read(refs / "visual-styles" / f"{style}.md")
+        if t:
+            parts.append(f"# Visual style: {style}\n\n{t}")
+    return parts
+
+
+_EXECUTOR_INTRO = "You are the PPT Master Executor. You produce exactly ONE SVG slide per request. You have no tools; all inputs are inline. No chatter."
+
+
 def _system_prompt(project: Path, lock_info: dict[str, Any], level: int) -> str:
+    if compact_prompt_enabled():
+        compact = _read(PROMPTS_DIR / "slide_executor_system.md")
+        if compact.strip():
+            parts = [_EXECUTOR_INTRO, compact]
+            if level < 3:
+                parts.extend(_mode_style_parts(lock_info))
+            return "\n\n---\n\n".join(p for p in parts if p.strip())
     refs = SKILL_DIR / "references"
     exec_text = _read(refs / "executor-base.md")
     std_text = _read(refs / "shared-standards.md")
@@ -329,6 +363,59 @@ def _system_prompt(project: Path, lock_info: dict[str, Any], level: int) -> str:
             parts.append(f"# Visual style: {style}\n\n{t}")
     parts.append(_read(PROMPTS_DIR / "slide_web_addendum.md"))
     return "\n\n---\n\n".join(p for p in parts if p.strip())
+
+
+def _viewbox_wh(lock_info: dict[str, Any]) -> tuple[float, float]:
+    m = re.match(r"\s*0\s+0\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)", lock_info.get("viewBox", "") or "")
+    return (float(m.group(1)), float(m.group(2))) if m else (1280.0, 720.0)
+
+
+_FREE_PAGE_RE = re.compile(r"(cover|closing|thank|section divider|chapter|agenda cover|封面|结尾|致谢|章节|目录页?封面)", re.IGNORECASE)
+
+
+def chrome_contract(slide_number: int, total: int, lock_info: dict[str, Any], brief_text: str, has_layout_template: bool) -> str:
+    """Deterministic header/footer geometry shared by every content page (1280x720 reference, scaled)."""
+    if has_layout_template:
+        return (
+            "<chrome_contract>\nchrome geometry is defined by the layout template below - copy its header/footer/bg verbatim.\n</chrome_contract>\n\n"
+        )
+    head = (brief_text or "").splitlines()[0] if brief_text else ""
+    is_free = slide_number == 1 or bool(_FREE_PAGE_RE.search(head)) or (slide_number == total and total > 1 and bool(_FREE_PAGE_RE.search(brief_text or "")))
+    if is_free:
+        return (
+            "<chrome_contract>\nthis page is free full-bleed: no header/footer chrome except a page number if the spec says so.\n</chrome_contract>\n\n"
+        )
+    W, H = _viewbox_wh(lock_info)
+    sx, sy = W / 1280.0, H / 720.0
+
+    def r(v: float, s: float) -> int:
+        return int(round(v * s))
+
+    left, right = r(64, sx), r(1216, sx)
+    kicker_y, title_y, rule_y = r(48, sy), r(86, sy), r(142, sy)
+    body_top, body_bottom = r(164, sy), r(656, sy)
+    frule_y, footer_y = r(672, sy), r(694, sy)
+    two_line_max = r(124, sy)
+    extra = " (portrait canvas: title may take up to 3 lines)" if H > W else ""
+    return (
+        "<chrome_contract>\n"
+        "# applies to CONTENT pages; cover / section-divider / closing pages are free full-bleed and ignore it\n"
+        f"canvas: {r(W,1)}x{r(H,1)} - margins: left={left} right={right} (x), body safe zone y={body_top}..{body_bottom}{extra}\n"
+        f'header (<g id="p{slide_number:02d}-header">):\n'
+        f'  kicker/eyebrow  <text x={left} y={kicker_y}>   font-size = locked caption size, accent colour, ONE line, <= 60 chars\n'
+        f'  main title      <text x={left} y={title_y}>   locked title size; max 2 lines: if 2 lines, size <= 30 and 2nd baseline = {title_y} + 1.15*size (<= {two_line_max})\n'
+        f"  header divider  <line x1={left} y1={rule_y} x2={right} y2={rule_y} stroke-width=1>  (hairline, accent/neutral from lock)\n"
+        f"body: everything between y={body_top} and y={body_bottom} (>= 24 px gaps); nothing crosses y={body_bottom}.\n"
+        f'footer (<g id="p{slide_number:02d}-footer">):\n'
+        f"  footer divider  <line x1={left} y1={frule_y} x2={right} y2={frule_y} stroke-width=1>\n"
+        f"  footer text     <text x={left} y={footer_y} font-size=12>  deck title from design_spec section I (left)\n"
+        f'  page number     <text x={right} y={footer_y} text-anchor="end" font-size=12>  "{slide_number}" (or "{slide_number} / {total}")\n'
+        'ids & defs: <defs> is the FIRST child after the bg; background <g id="bg"> or <rect> first; gradients "grad-<role>" (e.g. grad-accent), '
+        'filter "shadowSoft" (the exact filter from the system prompt), clipPaths "clip-<name>"; content groups "card-1", "step-2"...; '
+        "chrome groups use ids containing header|footer|bg|decor|logo|pagenumber.\n"
+        "Do NOT add elements in the header/footer bands other than the above; do not move these coordinates.\n"
+        "</chrome_contract>\n\n"
+    )
 
 
 def build_slide_messages(
@@ -396,21 +483,24 @@ def build_slide_messages(
         except Exception:
             confirm_text = ""
 
-    anchors_all = style_anchors(project, fname, max_n=2, cap=6000)
+    anchors_all = style_anchors(project, fname, max_n=1, cap=3500)
+    compact = compact_prompt_enabled()
+    total_pages = max(outline) if outline else slide_number
+    chrome = chrome_contract(slide_number, total_pages, lock_info, brief_text, bool(layout_svg))
 
     def _assemble(level: int) -> list[dict[str, str]]:
-        spec = _trim_design_spec(design_spec, drop_tail=level >= 1)
+        spec = _trim_design_spec(design_spec, drop_tail=level >= 1 or compact, drop_outline=compact and bool(brief))
         anchors = anchors_all if level < 3 else [(n, _excerpt_svg(t, 2500)) for n, t in anchors_all]
         anchor_text = ""
         if anchors:
-            anchor_text = "<style_anchors>\nPreviously generated slides of this deck — match their chrome, spacing and typographic scale.\n" + "\n".join(
+            anchor_text = "<style_anchors>\nPreviously generated slide of this deck - secondary hint for spacing and typographic scale (chrome geometry comes from <chrome_contract>).\n" + "\n".join(
                 f"\n### {n}\n```svg\n{t}\n```" for n, t in anchors
             ) + "\n</style_anchors>\n\n"
         user = (
             f"<spec_lock.md>\n{lock_raw}\n</spec_lock.md>\n\n"
             f"<design_spec.md>\n{spec}\n</design_spec.md>\n\n"
             f"<image_facts>\n{image_facts(project, lock_info)}\n</image_facts>\n\n"
-            f"{confirm_text}{anchor_text}{this_page_text}\n\n"
+            f"{confirm_text}{chrome}{anchor_text}{this_page_text}\n\n"
             f"Generate slide {slide_number} now. Reply with the <svg> element"
             + (" followed by <notes>." if with_notes else " only.")
         )
@@ -499,9 +589,9 @@ def _get_semaphore(ctx: Any) -> asyncio.Semaphore:
     sem = getattr(ctx, "slide_semaphore", None)
     if sem is None:
         try:
-            n = int(os.environ.get("SLIDE_SUBAGENT_CONCURRENCY", "3"))
+            n = int(os.environ.get("SLIDE_SUBAGENT_CONCURRENCY", str(DEFAULT_CONCURRENCY)))
         except ValueError:
-            n = 3
+            n = DEFAULT_CONCURRENCY
         sem = asyncio.Semaphore(max(1, n))
         ctx.slide_semaphore = sem
     return sem
@@ -728,9 +818,9 @@ async def generate_slides_batch(args: dict[str, Any], *, job_id: str, store: Any
             return {"status": "failed", "error": "slide_numbers must be a list of integers (or [] / omitted for all)"}
 
     try:
-        max_conc = max(1, min(int(args.get("max_concurrency", 3) or 3), 6))
+        max_conc = max(1, min(int(args.get("max_concurrency", DEFAULT_CONCURRENCY) or DEFAULT_CONCURRENCY), 6))
     except (TypeError, ValueError):
-        max_conc = 3
+        max_conc = DEFAULT_CONCURRENCY
     overwrite = bool(args.get("overwrite", False))
     with_notes = args.get("with_notes", True) is not False
     extra_map = args.get("extra_instructions") or {}
@@ -790,9 +880,17 @@ async def generate_slides_batch(args: dict[str, Any], *, job_id: str, store: Any
         await emitter.complete(n, event)
         await store.append_log(job_id, f"[Slides] {finished}/{total} done\n")
 
-    anchors_needed = max(0, 2 - len(list(svg_dir.glob("*.svg")))) if svg_dir.is_dir() else 2
+    # Parallel from slide 1: the <chrome_contract> makes header/footer deterministic, so no serial
+    # anchor warm-up is needed.  SLIDE_SERIAL_ANCHORS=N restores an N-slide serial phase (default 0).
+    try:
+        serial_n = max(0, int(os.environ.get("SLIDE_SERIAL_ANCHORS", "0") or 0))
+    except ValueError:
+        serial_n = 0
+    anchors_needed = max(0, serial_n - len(list(svg_dir.glob("*.svg")))) if svg_dir.is_dir() else serial_n
     serial = todo[: min(anchors_needed, len(todo))]
     rest = todo[len(serial) :]
+    # The ctx semaphore gates every LLM call; size it to max_conc or it throttles the batch.
+    ctx.slide_semaphore = asyncio.Semaphore(max_conc)
 
     for n in serial:
         await _run(n)

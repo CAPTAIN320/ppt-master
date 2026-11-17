@@ -234,22 +234,35 @@ def test_batch_order_anchors_skip_notes():
         store = FakeStore()
 
         class SlowClient(FakeClient):
+            inflight = 0
+            max_inflight = 0
+
             async def _create(self, **kw):
                 # later slides finish first → exercises ordered emission
                 n = len(self.calls)
-                await asyncio.sleep(0.05 if n < 2 else max(0.0, 0.2 - 0.03 * n))
-                return await super()._create(**kw)
+                SlowClient.inflight += 1
+                SlowClient.max_inflight = max(SlowClient.max_inflight, SlowClient.inflight)
+                try:
+                    await asyncio.sleep(max(0.01, 0.2 - 0.03 * n))
+                    return await super()._create(**kw)
+                finally:
+                    SlowClient.inflight -= 1
 
         client = SlowClient([])
         client.chat = SimpleNamespace(completions=SimpleNamespace(create=client._create))
         ctx = ToolContext(client=client, model="claude-test")
-        res = _run(dispatch_tool("generate_slides_batch", {"project_path": str(proj), "slide_numbers": [1, 2, 3, 4, 5], "max_concurrency": 3}, "j", store, ctx=ctx))
+        res = _run(dispatch_tool("generate_slides_batch", {"project_path": str(proj), "slide_numbers": [1, 2, 3, 4, 5], "max_concurrency": 4}, "j", store, ctx=ctx))
         assert res["status"] == "ok" and [g["slide"] for g in res["generated"]] == [1, 2, 3, 4, 5], res
         assert res["notes_total"] is True and (proj / "notes" / "total.md").is_file()
         assert [e["slide"] for e in store.events] == [1, 2, 3, 4, 5] and store.increments == 0
-        # first two calls were serial (anchors); calls 3+ saw style anchors in their prompt
-        later_prompt = next(c for c in client.calls if "<style_anchors>" in c["messages"][-1]["content"])
-        assert later_prompt
+        # F5: no serial warm-up; every prompt carries the chrome contract and slides run in parallel
+        assert all("<chrome_contract>" in c["messages"][-1]["content"] for c in client.calls)
+        assert SlowClient.max_inflight == 4, SlowClient.max_inflight
+        # lower cap is honoured (ctx semaphore is resized to max_concurrency)
+        SlowClient.inflight = SlowClient.max_inflight = 0
+        res_b = _run(ss.generate_slides_batch({"project_path": str(proj), "slide_numbers": [1, 2, 3, 4, 5], "max_concurrency": 2, "overwrite": True, "with_notes": False}, job_id="j", store=store, ctx=ToolContext(client=client, model="claude-test")))
+        assert res_b["status"] == "ok" and SlowClient.max_inflight == 2, SlowClient.max_inflight
+        store.events.clear()
         assert len(json.dumps(res)) < 1500
         # idempotent resume: nothing to do, skipped
         n_calls = len(client.calls)
@@ -440,7 +453,148 @@ def test_system_prompt_size_realistic():
         msgs = ss.build_slide_messages(proj, 5, None, "", True, None)
         total = sum(len(m["content"]) for m in msgs)
         print(f"[info] slide prompt ≈ {total/1000:.0f}K chars (system {len(msgs[0]['content'])/1000:.0f}K)")
-        assert 20000 < total < ss.MAX_PROMPT_CHARS
+        assert len(msgs[0]["content"]) < 22_000, len(msgs[0]["content"])
+        assert 15_000 < total < 40_000, total
+
+
+def test_compact_prompt_has_all_hard_rules():
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t); proj = _make_project(tmp)
+        sysm = ss.build_slide_messages(proj, 5, None, "", True, None)[0]["content"]
+        for needle in ("viewBox", "foreignObject", "<mask>", "rgba(", "<g opacity", "font-size", "data-pptx-pattern", "data-icon",
+                       "../images/", "chart-plot-area", "&amp;", "tspan", "<g id", 'filter id="shadowSoft"', "chrome_contract"):
+            assert needle in sysm or needle.replace("<g opacity", "opacity") in sysm, needle
+        os.environ["SLIDE_COMPACT_PROMPT"] = "0"
+        try:
+            legacy = ss.build_slide_messages(proj, 5, None, "", True, None)
+            assert len(legacy[0]["content"]) > 50_000
+        finally:
+            os.environ.pop("SLIDE_COMPACT_PROMPT", None)
+
+
+def test_chrome_contract():
+    c = ss.chrome_contract(5, 12, {"viewBox": "0 0 1280 720"}, "#### Slide 05 - Pricing", False)
+    for needle in ("y=48", "y=86", "y1=142", "164", "656", "y1=672", "y=694", "p05-header", "p05-footer"):
+        assert needle in c, needle
+    c2 = ss.chrome_contract(5, 12, {"viewBox": "0 0 1024 768"}, "#### Slide 05 - Pricing", False)
+    assert "y=51" in c2 and "x=51" in c2, c2  # round(48*768/720)=51, round(64*0.8)=51
+    assert "free full-bleed" in ss.chrome_contract(1, 12, {}, "#### Slide 01 - Cover", False)
+    assert "free full-bleed" in ss.chrome_contract(12, 12, {}, "#### Slide 12 - Closing / Thank you", False)
+    assert "layout template" in ss.chrome_contract(5, 12, {}, "x", True)
+
+
+def test_batch_disk_anchor_and_skip():
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t); _setup(tmp); proj = _make_project(tmp, keep_svgs=True)
+        store = FakeStore()
+        client = FakeClient([])
+        ctx = ToolContext(client=client, model="claude-test")
+        res = _run(ss.generate_slides_batch({"project_path": str(proj), "slide_numbers": [1, 2, 3, 4], "with_notes": False}, job_id="j", store=store, ctx=ctx))
+        assert res["skipped"] == [1, 2] and [g["slide"] for g in res["generated"]] == [3, 4], res
+        for c in client.calls:
+            u = c["messages"][-1]["content"]
+            assert u.count("<style_anchors>") == 1 and u.count("\n### ") >= 1 and "<chrome_contract>" in u
+        anchors = ss.style_anchors(proj, "03_x.svg")
+        assert len(anchors) == 1 and not anchors[0][0].startswith("01_") and len(anchors[0][1]) <= 3600
+
+
+# ── B0 / F1 / F2 / F3 ─────────────────────────────────────────────────────────
+
+
+def test_log_event_is_stale():
+    from web import job_store as js
+    f = getattr(js, "log_event_is_stale", None)
+    if f is None:  # host run stubs web.job_store; load the real function source-only
+        import ast
+        src = Path(js.__file__ if hasattr(js, "__file__") else REPO / "web" / "job_store.py").read_text() if hasattr(js, "__file__") else (REPO / "web" / "job_store.py").read_text()
+        node = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "log_event_is_stale")
+        ns: dict = {}
+        exec(compile(ast.Module([node], []), "job_store", "exec"), ns)
+        f = ns["log_event_is_stale"]
+    assert f({"type": "log", "text": "a", "end": 10}, 10) is True
+    assert f({"type": "log", "text": "a", "end": 11}, 10) is False
+    assert f({"type": "log", "text": "a"}, 10) is False  # legacy event without offset
+    assert f({"type": "slide_ready", "end": 1}, 10) is False
+
+
+def test_resolve_path_and_slugify_and_user_message():
+    from web import tools as tl
+    R = tl.REPO_ROOT
+    assert tl._resolve_path("/projects/x/a.md") == R / "projects" / "x" / "a.md"
+    assert tl._resolve_path("/projects") == R / "projects"
+    assert tl._resolve_path("/skills/ppt-master/SKILL.md") == R / "skills" / "ppt-master" / "SKILL.md"
+    assert tl._resolve_path("/examples/x") == R / "examples" / "x"
+    assert tl._resolve_path("projects/x") == R / "projects" / "x"
+    assert tl._resolve_path("/app/projects/x") == Path("/app/projects/x")
+    assert tl._resolve_path("/projectsfoo") == Path("/projectsfoo")
+    assert agent_runner._slugify_topic("Japanese Tea Ceremony!") == "japanese_tea_ceremony"
+    assert agent_runner._slugify_topic("!!!") == "deck" and len(agent_runner._slugify_topic("a" * 100)) <= 40
+    proj = {"path": "/app/projects/tea_ppt169_20261117", "canvas": "ppt169", "brand": True, "sources": ["a.md"]}
+    msg = agent_runner._build_user_message("Tea", "ppt169", "claude", [], project=proj)
+    assert "project_path = /app/projects/tea_ppt169_20261117" in msg and "icon_sync.py" in msg and "PROJECT ALREADY INITIALIZED" in msg
+    assert "viewBox 0 0 1280 720" in msg and "a.md" in msg and "applied" in msg
+    legacy = agent_runner._build_user_message("Tea", "ppt169", "claude", [{"path": "/x/a.md", "type": "text/markdown"}])
+    assert "PROJECT ALREADY INITIALIZED" not in legacy and "uploaded" in legacy
+
+
+def test_patch_step4_and_confirm_ui_guard():
+    from web import skill_prompt as sp
+    sp._SKILL_MD_PATH = REPO / "skills" / "ppt-master" / "SKILL.md"
+    t = sp.get_skill_md()
+    assert "confirm_ui/recommendations.json" not in t and "confirm_ui/server.py --daemon" not in t
+    assert "confirm_gate" in t and "### Step 7" in t
+    out = sp._patch_step4("no markers")
+    assert out.startswith("no markers") and "confirm_gate" in out
+    assert "confirm_ui/" in sp.get_system_prompt() and "Never read, write or run" in sp.get_system_prompt()
+    for tool, a in (("read_file", {"path": "/app/projects/x/confirm_ui/result.json"}), ("write_file", {"path": "/app/x/confirm_ui/recommendations.json", "content": "{}"}),
+                    ("list_dir", {"path": "/app/skills/ppt-master/scripts/confirm_ui"}), ("read_file", {"path": "/app/skills/ppt-master/scripts/docs/confirm_ui.md"})):
+        res = _run(dispatch_tool(tool, a, "j", FakeStore()))
+        assert "error" in res and "confirm_gate" in res["error"], (tool, res)
+
+
+def test_list_dir_cap_pattern_hint():
+    from web import tools as tl
+    with tempfile.TemporaryDirectory() as t:
+        d = Path(t) / "big"; d.mkdir()
+        for i in range(500):
+            (d / f"f{i:03d}.txt").write_text("x")
+        (d / "chart-bar.svg").write_text("x")
+        res = _run(dispatch_tool("list_dir", {"path": str(d)}, "j", FakeStore()))
+        assert len(res["entries"]) == tl.MAX_LIST_DIR_ENTRIES == 120 and res["truncated"] is True and res["total_entries"] == 501 and "pattern" in res["hint"]
+        res = _run(dispatch_tool("list_dir", {"path": str(d), "pattern": "CHART"}, "j", FakeStore()))
+        assert [e["name"] for e in res["entries"]] == ["chart-bar.svg"] and "truncated" not in res
+        icons = Path(t) / "templates" / "icons" / "lib"; icons.mkdir(parents=True)
+        for i in range(200):
+            (icons / f"i{i}.svg").write_text("x")
+        res = _run(dispatch_tool("list_dir", {"path": str(icons)}, "j", FakeStore()))
+        assert res["truncated"] and "icon_sync" in res["hint"]
+        assert "error" in _run(dispatch_tool("list_dir", {"path": str(d / "f001.txt")}, "j", FakeStore()))
+        assert "error" in _run(dispatch_tool("list_dir", {"path": str(d / "nope")}, "j", FakeStore()))
+    props = next(x for x in tl.TOOL_DEFINITIONS if x["function"]["name"] == "list_dir")["function"]["parameters"]["properties"]
+    assert props["pattern"]["type"] == "string"
+
+
+def test_compact_history_list_dir():
+    def call(cid, name, args):
+        return {"id": cid, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+
+    big = json.dumps({"path": "/app/x", "entries": [{"name": f"file_{i:04d}", "type": "file"} for i in range(150)]})
+    assert len(big) > 3000
+    msgs = [
+        {"role": "user", "content": "SKILL"}, {"role": "assistant", "content": "ready"}, {"role": "user", "content": "go"},
+        {"role": "assistant", "content": None, "tool_calls": [call("d1", "list_dir", {"path": "/app/x"})]},
+        {"role": "tool", "tool_call_id": "d1", "content": big},
+        {"role": "assistant", "content": None, "tool_calls": [call("d2", "list_dir", {"path": "/app/y"})]},
+        {"role": "tool", "tool_call_id": "d2", "content": big},
+        {"role": "assistant", "content": None, "tool_calls": [call("d3", "list_dir", {"path": "/app/z"})]},
+        {"role": "tool", "tool_call_id": "d3", "content": big},
+    ]
+    freed = agent_runner._compact_history(msgs, None, "claude-sonnet")
+    assert freed > 0 and json.loads(msgs[4]["content"])["compacted"] is True and "150 entries" in msgs[4]["content"]
+    assert msgs[8]["content"] == big  # protected tail untouched
+    agent_runner._assert_pairing(msgs)
+    snap = json.dumps(msgs)
+    assert agent_runner._compact_history(msgs, None, "claude-sonnet") == 0 and json.dumps(msgs) == snap
 
 
 if __name__ == "__main__":

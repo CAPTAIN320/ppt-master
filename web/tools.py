@@ -19,6 +19,10 @@ from typing import Any
 REPO_ROOT = Path("/app")
 SCRIPTS_DIR = REPO_ROOT / "skills" / "ppt-master" / "scripts"
 
+MAX_LIST_DIR_ENTRIES = 120
+_CONFIRM_UI_ERROR = "confirm_ui files are not used in web mode - call the confirm_gate tool directly."
+_MOUNT_ALIASES = ("projects", "skills", "examples")
+
 
 def slide_subagent_enabled() -> bool:
     """Feature flag: isolated per-slide sub-agent tools (default ON)."""
@@ -98,11 +102,12 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "list_dir",
-            "description": "List files and directories at a given path.",
+            "description": "List files and directories at a given path (capped at 120 entries; use pattern to filter).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Directory path to list"},
+                    "pattern": {"type": "string", "description": "Optional case-insensitive substring filter on entry names."},
                 },
                 "required": ["path"],
             },
@@ -216,8 +221,8 @@ SLIDE_TOOL_DEFINITIONS: list[dict] = [
             "name": "generate_slides_batch",
             "description": (
                 "Generate many slide SVGs via isolated sub-agents with bounded concurrency (preferred over repeated "
-                "generate_slide_svg). If fewer than 2 slides exist yet, the first 2 are generated serially "
-                "(cover + first content page) and used as visual anchors; the rest run in parallel. Writes "
+                "generate_slide_svg). All requested slides are generated in parallel (bounded by max_concurrency) "
+                "using a locked header/footer chrome contract - no serial warm-up. Writes "
                 "notes/total.md when all notes exist. Returns a compact summary."
             ),
             "parameters": {
@@ -229,7 +234,7 @@ SLIDE_TOOL_DEFINITIONS: list[dict] = [
                         "items": {"type": "integer"},
                         "description": "1-based slide numbers to generate. Pass an empty array [] (or omit) to generate ALL slides in design_spec.md §IX.",
                     },
-                    "max_concurrency": {"type": "integer", "description": "Maximum parallel slide sub-agents, 1 to 6 (default: 3)."},
+                    "max_concurrency": {"type": "integer", "description": "Maximum parallel slide sub-agents, 1 to 6 (default: 4)."},
                     "overwrite": {"type": "boolean", "description": "Regenerate slides whose SVG already exists (default: false — skip for idempotent resume)."},
                     "extra_instructions": {
                         "type": "object",
@@ -255,10 +260,18 @@ def get_tool_definitions() -> list[dict]:
 
 
 def _resolve_path(path: str) -> Path:
-    p = Path(path)
-    if p.is_absolute():
-        return p
-    return REPO_ROOT / p
+    s = str(path).strip()
+    for m in _MOUNT_ALIASES:  # "/projects", "/projects/x", "/skills/...", "/examples/..."
+        if s == f"/{m}" or s.startswith(f"/{m}/"):
+            s = str(REPO_ROOT) + s  # -> /app/projects/...
+            break
+    p = Path(s)
+    return p if p.is_absolute() else REPO_ROOT / p
+
+
+def _is_confirm_ui_path(p: Path) -> bool:
+    sp = str(p).replace("\\", "/")
+    return "/confirm_ui" in sp or "confirm_ui.md" in sp
 
 
 async def dispatch_tool(
@@ -273,6 +286,8 @@ async def dispatch_tool(
 
     if name == "read_file":
         p = _resolve_path(args["path"])
+        if _is_confirm_ui_path(p):
+            return {"error": _CONFIRM_UI_ERROR}
         try:
             return {"content": p.read_text(encoding="utf-8"), "path": str(p)}
         except FileNotFoundError:
@@ -282,10 +297,20 @@ async def dispatch_tool(
 
     elif name == "write_file":
         p = _resolve_path(args["path"])
+        if _is_confirm_ui_path(p):
+            return {"error": _CONFIRM_UI_ERROR}
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(args["content"], encoding="utf-8")
+        # Any write under <REPO_ROOT>/projects/<name>/ tracks that project (except uploads)
+        projects_root = REPO_ROOT / "projects"
+        try:
+            rel = p.relative_to(projects_root)
+        except ValueError:
+            rel = None
+        if rel is not None and len(rel.parts) >= 2 and rel.parts[0] != "uploads":
+            store.set_project_path(job_id, str(projects_root / rel.parts[0]))
         # If this looks like an SVG output or project spec, update the project path hint
-        if "svg_output" in str(p) or "svg_final" in str(p):
+        elif "svg_output" in str(p) or "svg_final" in str(p):
             project_path = str(p.parent.parent)
             store.set_project_path(job_id, project_path)
         elif p.name in ("design_spec.md", "spec_lock.md"):
@@ -294,14 +319,36 @@ async def dispatch_tool(
 
     elif name == "list_dir":
         p = _resolve_path(args["path"])
+        if _is_confirm_ui_path(p):
+            return {"error": _CONFIRM_UI_ERROR}
         try:
             entries = sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name))
-            return {
-                "path": str(p),
-                "entries": [{"name": e.name, "type": "file" if e.is_file() else "dir"} for e in entries],
-            }
         except FileNotFoundError:
             return {"error": f"Directory not found: {p}"}
+        except NotADirectoryError:
+            return {"error": f"Not a directory: {p}"}
+        except Exception as exc:
+            return {"error": str(exc)}
+        pat = str(args.get("pattern") or "").strip().lower()
+        if pat:
+            entries = [e for e in entries if pat in e.name.lower()]
+        total = len(entries)
+        shown = entries[:MAX_LIST_DIR_ENTRIES]
+        out: dict[str, Any] = {
+            "path": str(p),
+            "entries": [{"name": e.name, "type": "file" if e.is_file() else "dir"} for e in shown],
+        }
+        if total > len(shown):
+            out.update(total_entries=total, truncated=True)
+            hint = f"Showing first {len(shown)} of {total}. Narrow with list_dir(path, pattern='<substring>')."
+            if "templates/icons" in str(p).replace("\\", "/"):
+                hint = (
+                    "Icon library is huge - do NOT list it. Pass common Tabler names directly to icon_sync.py "
+                    "(e.g. tabler-outline/chart-bar, users, target, bulb, clock, world, shield, settings, check) "
+                    "and re-pick any name it reports missing, or search with list_dir(path, pattern='chart')."
+                )
+            out["hint"] = hint
+        return out
 
     elif name == "run_script":
         script = args["script"]
