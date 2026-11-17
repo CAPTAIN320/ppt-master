@@ -235,7 +235,7 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
                     break
                 continue
             # Track slide count for the Library tab
-            if event.get("type") == "slide_ready":
+            if event.get("type") == "slide_ready" and not event.get("regenerated"):
                 store.increment_slide_count(job_id)
             await websocket.send_text(json.dumps(event))
             if event.get("type") in ("job_done", "error"):

@@ -12,11 +12,33 @@ import asyncio
 import json
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path("/app")
 SCRIPTS_DIR = REPO_ROOT / "skills" / "ppt-master" / "scripts"
+
+
+def slide_subagent_enabled() -> bool:
+    """Feature flag: isolated per-slide sub-agent tools (default ON)."""
+    return os.environ.get("SLIDE_SUBAGENT", "1").lower() not in ("0", "false", "no")
+
+
+# Backward-compatible module-level constant evaluated at import time; prefer
+# slide_subagent_enabled() for runtime checks.
+SLIDE_SUBAGENT = slide_subagent_enabled()
+
+
+@dataclass
+class ToolContext:
+    """Per-job context for tools that need to call the LLM (slide sub-agent)."""
+
+    client: Any  # AsyncOpenAI built once in run_job
+    model: str
+    auto_confirm: bool = False
+    slide_model: str | None = None  # SLIDE_SUBAGENT_MODEL override
+    slide_semaphore: asyncio.Semaphore | None = None  # per-job cap, created lazily
 
 
 def _parse_page_count_target(raw: Any) -> int | None:
@@ -161,6 +183,77 @@ TOOL_DEFINITIONS: list[dict] = [
 ]
 
 
+SLIDE_TOOL_DEFINITIONS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_slide_svg",
+            "description": (
+                "Step 6 (Executor) — generate ONE slide SVG in an isolated sub-agent and write it to "
+                "<project_path>/svg_output/. The sub-agent reads design_spec.md §IX, spec_lock.md, templates and "
+                "images itself, so do NOT read executor-base.md / shared-standards.md / mode / visual-style files "
+                "and do NOT write SVG with write_file. It runs the SVG quality check, self-corrects once, writes "
+                "speaker notes, and emits slide_ready automatically. Returns a tiny status JSON."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string", "description": "Project dir, e.g. /app/projects/foo_ppt169_20261117"},
+                    "slide_number": {"type": "integer", "minimum": 1, "description": "1-based page number matching '#### Slide NN' in design_spec.md §IX"},
+                    "filename": {"type": "string", "description": "Optional explicit '<NN>_<slug>.svg'. Default: derived from the §IX page name."},
+                    "extra_instructions": {"type": "string", "description": "Optional (<=800 chars): user feedback / fix request for this slide (e.g. regeneration after review)."},
+                    "with_notes": {"type": "boolean", "default": True},
+                    "title": {"type": "string", "description": "Optional fallback title when design_spec.md §IX has no matching '#### Slide NN' block."},
+                    "slide_spec": {"type": "string", "description": "Optional inline brief for this slide, used only when §IX has no matching block."},
+                },
+                "required": ["project_path", "slide_number"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_slides_batch",
+            "description": (
+                "Generate many slide SVGs via isolated sub-agents with bounded concurrency (preferred over repeated "
+                "generate_slide_svg). If fewer than 2 slides exist yet, the first 2 are generated serially "
+                "(cover + first content page) and used as visual anchors; the rest run in parallel. Writes "
+                "notes/total.md when all notes exist. Returns a compact summary."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_path": {"type": "string"},
+                    "slide_numbers": {
+                        "description": "Array of 1-based slide numbers, or the string 'all' (every '#### Slide NN' in §IX)",
+                        "oneOf": [
+                            {"type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 1},
+                            {"type": "string", "enum": ["all"]},
+                        ],
+                    },
+                    "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 6, "default": 3},
+                    "overwrite": {"type": "boolean", "default": False, "description": "Regenerate slides whose SVG already exists (default: skip -> idempotent resume)."},
+                    "extra_instructions": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Optional map slide_number(as string) -> per-slide extra instructions.",
+                    },
+                    "with_notes": {"type": "boolean", "default": True},
+                },
+                "required": ["project_path", "slide_numbers"],
+            },
+        },
+    },
+]
+
+
+def get_tool_definitions() -> list[dict]:
+    """Tool schemas to advertise; slide sub-agent tools only when SLIDE_SUBAGENT is on."""
+    if slide_subagent_enabled():
+        return TOOL_DEFINITIONS + SLIDE_TOOL_DEFINITIONS
+    return list(TOOL_DEFINITIONS)
+
+
 # ── Dispatcher ────────────────────────────────────────────────────────────────
 
 
@@ -177,6 +270,7 @@ async def dispatch_tool(
     job_id: str,
     store: Any,  # JobStore — avoid circular import
     auto_confirm: bool = False,
+    ctx: ToolContext | None = None,
 ) -> Any:
     """Execute a tool call and return a JSON-serialisable result."""
 
@@ -283,6 +377,16 @@ async def dispatch_tool(
             },
         )
         return {"signalled": True, "slide": slide_num}
+
+    elif name in ("generate_slide_svg", "generate_slides_batch"):
+        if not slide_subagent_enabled():
+            return {"error": f"Unknown tool: {name}"}
+        if ctx is None:
+            return {"error": "slide sub-agent unavailable (no LLM context)"}
+        from . import slide_subagent  # lazy import: avoids import-time cycles
+
+        fn = slide_subagent.generate_slide_svg if name == "generate_slide_svg" else slide_subagent.generate_slides_batch
+        return await fn(args, job_id=job_id, store=store, ctx=ctx)
 
     elif name == "web_fetch":
         url = args["url"]

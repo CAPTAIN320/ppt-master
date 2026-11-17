@@ -22,8 +22,14 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from .job_store import JobStore
+from .llm_utils import (  # noqa: F401  (re-exported for backward compatibility)
+    _is_gemini_model,
+    _is_token_limit_error,
+    _max_tokens_for,
+    _strip_thinking_content_blocks,
+)
 from .skill_prompt import get_skill_md, get_system_prompt
-from .tools import TOOL_DEFINITIONS, dispatch_tool
+from .tools import TOOL_DEFINITIONS, ToolContext, dispatch_tool, get_tool_definitions, slide_subagent_enabled
 
 REPO_ROOT = Path("/app")
 PROJECTS_DIR = REPO_ROOT / "projects"
@@ -38,71 +44,171 @@ _BRAND_PATHS: dict[str, str] = {
     "rakuten-mobile":  "skills/ppt-master/templates/brands/rakuten_mobile/",
 }
 
+# ── Context-history compaction ────────────────────────────────────────────────
 
-def _strip_thinking_content_blocks(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+_REF_MARKERS = (
+    "/skills/ppt-master/references/",
+    "/skills/ppt-master/workflows/",
+    "/skills/ppt-master/templates/",
+)
+_COMPACT_MIN_LEN = 3000
+_COMPACTED_PREFIX = "[compacted"
+
+
+def _history_chars(messages: list[dict[str, Any]]) -> int:
+    total = 0
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, str):
+            total += len(c)
+        elif isinstance(c, list):
+            total += sum(len(b.get("text", "")) for b in c if isinstance(b, dict))
+        for tc in m.get("tool_calls") or []:
+            total += len(tc.get("function", {}).get("arguments", "") or "")
+    return total
+
+
+def _assert_pairing(messages: list[dict[str, Any]]) -> None:
+    """Debug/self-test helper: every tool_call has exactly one tool answer and vice versa."""
+    pending: dict[str, int] = {}
+    for m in messages:
+        if m.get("role") == "assistant":
+            for tc in m.get("tool_calls") or []:
+                assert tc["id"] not in pending, f"duplicate tool_call id {tc['id']}"
+                pending[tc["id"]] = 0
+        elif m.get("role") == "tool":
+            tid = m.get("tool_call_id")
+            assert tid in pending, f"tool message {tid} has no preceding tool_call"
+            pending[tid] += 1
+            assert isinstance(m.get("content"), str), "tool content must stay a str"
+    for tid, cnt in pending.items():
+        assert cnt == 1, f"tool_call {tid} answered {cnt} times"
+
+
+def _is_reference_path(path: str) -> bool:
+    p = path.replace("\\", "/")
+    if any(mk in p for mk in _REF_MARKERS):
+        return True
+    base = Path(p).name
+    return base in ("strategist.md", "executor-base.md", "shared-standards.md") or base.startswith("image-") or "/modes/" in p or "/visual-styles/" in p
+
+
+def _compact_history(messages: list[dict[str, Any]], project_path: str | None, model: str) -> int:
+    """Shrink stale bulky content in ``messages`` in place; returns chars freed.
+
+    Only message *content strings* (and, for non-Gemini models, the
+    ``arguments`` string of already-persisted ``write_file`` calls) are
+    rewritten. No message is removed, reordered or merged, and ids/keys are
+    never touched. Idempotent: already-compacted content is skipped.
     """
-    Strip ``thinking``/``thought`` content blocks from the message history.
+    if not messages:
+        return 0
 
-    Some models (e.g. Claude extended-thinking) embed reasoning blocks inside
-    the ``content`` list of assistant messages.  These must be removed before
-    re-sending the history or certain providers will reject the request.
+    call_index: dict[str, tuple[str, dict[str, Any], dict[str, Any]]] = {}
+    last_assistant_idx = -1
+    assistant_idxs: list[int] = []
+    for i, m in enumerate(messages):
+        if m.get("role") == "assistant":
+            assistant_idxs.append(i)
+            for tc in m.get("tool_calls") or []:
+                try:
+                    a = json.loads(tc["function"].get("arguments") or "{}")
+                except Exception:
+                    a = {}
+                call_index[tc["id"]] = (tc["function"].get("name", ""), a if isinstance(a, dict) else {}, tc)
+            if m.get("tool_calls"):
+                last_assistant_idx = i
+    # Protected tail: from the last tool-calling assistant message (and the 2 assistant turns before the end)
+    tail_start = last_assistant_idx if last_assistant_idx >= 0 else len(messages)
+    if len(assistant_idxs) >= 2:
+        tail_start = min(tail_start, assistant_idxs[-2])
 
-    NOTE: This function intentionally does NOT touch ``thought_signature`` on
-    tool-call objects.  Gemini thinking models require ``thought_signature`` to
-    be PRESENT in the history — stripping it causes the
-    "missing a thought_signature" HTTP 400.  Gemini tool calls are assembled
-    via the non-streaming path (see ``_call_llm_non_streaming``) which
-    preserves ``thought_signature`` from ``model_extra``.
-    """
-    sanitized: list[dict[str, Any]] = []
-    for msg in messages:
-        msg = dict(msg)  # shallow copy — don't mutate the live history
+    spec_ready = False
+    if project_path:
+        pp = Path(project_path)
+        spec_ready = (pp / "design_spec.md").is_file() and (pp / "spec_lock.md").is_file()
 
-        # ── Strip thinking/thought content blocks ─────────────────────────
-        if isinstance(msg.get("content"), list):
-            msg["content"] = [block for block in msg["content"] if not (isinstance(block, dict) and block.get("type") in ("thinking", "thought"))]
-            # If all blocks were thinking blocks, collapse to None so the
-            # message stays valid (assistant with only tool_calls).
-            if not msg["content"]:
-                msg["content"] = None
+    # Latest read index per path (for superseded-read compaction)
+    latest_read: dict[str, int] = {}
+    for i, m in enumerate(messages):
+        if m.get("role") == "tool" and m.get("tool_call_id") in call_index:
+            name, a, _tc = call_index[m["tool_call_id"]]
+            if name == "read_file" and isinstance(a.get("path"), str):
+                latest_read[a["path"]] = i
 
-        sanitized.append(msg)
-    return sanitized
+    freed = 0
+    gemini = _is_gemini_model(model)
 
+    for i, m in enumerate(messages):
+        if i >= tail_start:
+            break
+        role = m.get("role")
 
-def _is_gemini_model(model: str) -> bool:
-    """Return True if the model name indicates a Gemini model."""
-    return "gemini" in model.lower()
+        if role == "tool":
+            content = m.get("content")
+            if not isinstance(content, str) or len(content) <= _COMPACT_MIN_LEN or _COMPACTED_PREFIX in content[:300] or '"compacted": true' in content[:300]:
+                continue
+            info = call_index.get(m.get("tool_call_id", ""))
+            if not info:
+                continue
+            name, a, _tc = info
+            path = a.get("path") if isinstance(a.get("path"), str) else ""
+            new: str | None = None
+            if name == "read_file" and path:
+                base = Path(path).name
+                superseded = latest_read.get(path, i) > i
+                is_spec = base in ("design_spec.md", "spec_lock.md") and "/references/" not in path
+                is_ref = _is_reference_path(path) and not is_spec
+                is_svg = base.lower().endswith(".svg")
+                should = False
+                if is_ref:
+                    should = spec_ready or (len(content) > 20000 and i < tail_start - 4)
+                elif is_spec:
+                    should = superseded
+                elif is_svg:
+                    should = len(content) > 4000 and superseded
+                if should:
+                    reason = "superseded by a later read" if (superseded and not is_ref) else "read earlier; call read_file again if needed"
+                    new = json.dumps({"path": path, "content": f"[compacted: {len(content)} chars of {base} — {reason}]", "compacted": True})
+            elif name in ("run_script", "web_fetch") and len(content) > 6000:
+                new = content[:1500] + f"\n…[compacted {len(content) - 3000} chars]…\n" + content[-1500:]
+                new = json.dumps({"compacted": True, "output": new})
+            if new is not None and len(new) < len(content):
+                freed += len(content) - len(new)
+                m["content"] = new
 
+        elif role == "assistant" and not gemini:
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                if fn.get("name") != "write_file":
+                    continue
+                args_s = fn.get("arguments") or ""
+                if len(args_s) <= 8000 or "[written to disk" in args_s[:400]:
+                    continue
+                try:
+                    a = json.loads(args_s)
+                except Exception:
+                    continue
+                path = a.get("path") if isinstance(a, dict) else None
+                content = a.get("content") if isinstance(a, dict) else None
+                if not isinstance(path, str) or not isinstance(content, str):
+                    continue
+                if not (path.lower().endswith(".svg") or path.lower().endswith(".md")):
+                    continue
+                # Only if the paired tool result exists and reports success
+                result_ok = False
+                for later in messages[i + 1 :]:
+                    if later.get("role") == "tool" and later.get("tool_call_id") == tc.get("id"):
+                        rc = later.get("content") or ""
+                        result_ok = isinstance(rc, str) and '"error"' not in rc[:200]
+                        break
+                if not result_ok:
+                    continue
+                new_args = json.dumps({"path": path, "content": f"[written to disk: {len(content.encode())} bytes — content elided from history]"})
+                freed += len(args_s) - len(new_args)
+                fn["arguments"] = new_args
+    return freed
 
-def _max_tokens_for(model: str) -> int:
-    """Return the max_tokens cap to use for this model.
-
-    All models currently offered in the UI (claude-sonnet-5, claude-sonnet-4.6,
-    gemini-3.1-pro-preview, gpt-5.4) support 32K+ output tokens, so a flat cap
-    is used regardless of model name. The `_is_token_limit_error()` fallback in
-    the call sites (drop to 16000 once, then hard-fail) still protects against
-    the edge case of an env-overridden AGENT_MODEL with a lower real ceiling.
-    """
-    return 32000
-
-
-def _is_token_limit_error(exc: Exception) -> bool:
-    """Best-effort detection of an HTTP 400 caused by a token/max_tokens problem.
-
-    Used only to decide whether a single conservative-cap retry (Step 5) is
-    warranted — intentionally narrow, not a general-purpose retry-everything
-    mechanism.
-    """
-    response = getattr(exc, "response", None)
-    status_code = getattr(response, "status_code", None)
-    if status_code != 400:
-        return False
-    try:
-        body = (response.text or "").lower()
-    except Exception:
-        body = str(exc).lower()
-    return any(needle in body for needle in ("max_tokens", "maximum context length", "token limit", "too many tokens", "max tokens"))
 
 
 def _has_pipeline_progress(project_path: str | None, since: float | None = None) -> bool:
@@ -178,6 +284,15 @@ def _fallback_project_path(since: float) -> str | None:
     return str(candidates[0][1])
 
 
+def _slide_ready_hint() -> str:
+    if slide_subagent_enabled():
+        return (
+            "Generate slides with generate_slides_batch (it emits slide_ready itself); "
+            "call slide_ready only for SVGs you wrote yourself with write_file."
+        )
+    return "Use the slide_ready tool after writing each SVG page."
+
+
 def _build_user_message(
     topic: str,
     canvas_format: str,
@@ -199,7 +314,7 @@ def _build_user_message(
         f"Canvas format: {canvas_format}\n"
         f"Follow the full PPT Master pipeline from SKILL.md.\n"
         f"Use the confirm_gate tool at Step 4 (Eight Confirmations).\n"
-        f"Use the slide_ready tool after writing each SVG page.\n"
+        f"{_slide_ready_hint()}\n"
         f"Run finalize_svg.py when done. Do NOT run svg_to_pptx.py — "
         f"PPTX export is handled on demand by the server when the user clicks Download."
     )
@@ -309,6 +424,13 @@ async def run_job(
     last_retry_cause: str | None = None  # "truncation" | "no_progress" | "unexpected"
 
     use_non_streaming = _is_gemini_model(model)
+    tool_defs = get_tool_definitions()
+    ctx = ToolContext(
+        client=client,
+        model=model,
+        auto_confirm=auto_confirm,
+        slide_model=os.environ.get("SLIDE_SUBAGENT_MODEL") or None,
+    )
 
     async def _report_llm_error(exc: Exception) -> None:
         full_tb = traceback.format_exc()
@@ -336,6 +458,17 @@ async def run_job(
 
         await store.append_log(job_id, f"\n[Agent] Iteration {iteration}...\n")
 
+        # Context-history compaction (deterministic + idempotent): stub out stale
+        # reference-doc reads and already-on-disk SVG writes before each call.
+        try:
+            _job_meta = store.get_job(job_id)
+            freed = _compact_history(messages, (_job_meta or {}).get("project_path"), model)
+            if freed:
+                await store.append_log(job_id, f"[Agent] Context compaction freed {freed:,} chars\n")
+        except Exception as exc:  # never let compaction break the pipeline
+            await store.append_log(job_id, f"[Agent] Context compaction skipped: {exc}\n")
+        await store.append_log(job_id, f"[Agent] History size: {_history_chars(messages):,} chars / {len(messages)} msgs\n")
+
         outgoing = [{"role": "system", "content": system_prompt}] + _strip_thinking_content_blocks(messages)
 
         async def _call_llm_once(max_tokens: int) -> tuple[str, list[dict[str, Any]], str | None]:
@@ -358,7 +491,7 @@ async def run_job(
                 response = await client.chat.completions.create(
                     model=model,
                     messages=outgoing,
-                    tools=TOOL_DEFINITIONS,
+                    tools=tool_defs,
                     tool_choice="auto",
                     max_tokens=max_tokens,
                     stream=False,
@@ -399,7 +532,7 @@ async def run_job(
                 stream = await client.chat.completions.create(
                     model=model,
                     messages=outgoing,
-                    tools=TOOL_DEFINITIONS,
+                    tools=tool_defs,
                     tool_choice="auto",
                     max_tokens=max_tokens,
                     stream=True,
@@ -598,7 +731,7 @@ async def run_job(
             await store.append_log(job_id, f"\n[Tool] {tool_name}({json.dumps(tool_args)[:200]})\n")
 
             try:
-                result = await dispatch_tool(tool_name, tool_args, job_id, store, auto_confirm=auto_confirm)
+                result = await dispatch_tool(tool_name, tool_args, job_id, store, auto_confirm=auto_confirm, ctx=ctx)
             except Exception as exc:
                 result = {"error": f"Tool execution failed: {exc}"}
 

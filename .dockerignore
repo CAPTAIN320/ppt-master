@@ -1,0 +1,10 @@
+.git
+.herd
+.env
+.env.*
+projects/*
+!projects/.gitkeep
+data
+**/__pycache__
+**/*.pyc
+.DS_Store
