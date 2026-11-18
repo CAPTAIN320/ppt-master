@@ -15,6 +15,62 @@ logger = logging.getLogger(__name__)
 _SKILL_MD_PATH = Path("/app/skills/ppt-master/SKILL.md")
 
 
+def _skill_dir() -> Path:
+    """/app/skills/ppt-master in the container, else the repo checkout next to ``web/``."""
+    if _SKILL_MD_PATH.parent.is_dir():
+        return _SKILL_MD_PATH.parent
+    return Path(__file__).resolve().parent.parent / "skills" / "ppt-master"
+
+
+_SPEC_LOCK_SKELETON = """\
+SPEC_LOCK SKELETON (spec_lock.md - emit ONLY `##` sections with `- key: value` data lines, exactly this order and these key names; no `>` notes):
+## canvas        - viewBox: 0 0 1280 720 / - format: PPT 16:9
+## mode          - mode: <mode>
+## visual_style  - visual_style: <style>
+## colors        - bg, surface, primary, accent, text, text_secondary, border (HEX like #FAF7F2); image_rendering, image_palette (only if AI images)
+## typography    - font_family, title_family, body_family, emphasis_family; sizes body:24 title:42 subtitle:28 subheading:26 annotation:18 lead:17 footnote:16 caption:14 compact:13 badge:12 micro:11 tiny:10
+## icons         - library: tabler-outline / stroke_width: 1.5 / inventory: <comma-separated icon names>
+## images        - img_<slug>: images/<file>   (omit section if no images)
+## page_rhythm   - P01: anchor|dense|breathing  (one line per page)
+## page_layouts  - P03: <layout>   (optional)
+## page_charts   - P02: <chart-type>   (optional; only pages with a templates/charts match)
+## forbidden
+- Mixing icon libraries
+- rgba()
+- `<style>`, `class`, `<foreignObject>`, `textPath`, `@font-face`, `<animate*>`, `<script>`, `<iframe>`, `<symbol>`+`<use>`
+- `<g opacity>` (set opacity on each child element individually)
+- HTML named entities in text (`&nbsp;`, `&mdash;`, `&copy;`, `&ndash;`, `&reg;`, `&hellip;`, `&bull;` ...) - write raw Unicode; escape XML reserved chars as `&amp; &lt; &gt; &quot; &apos;`
+"""
+
+
+def build_strategist_catalog() -> str:
+    """Pre-injected Strategist cheat-sheet: choice names + spec_lock skeleton.
+
+    Names are read from the references/ directories at call time so the catalog
+    never drifts from disk.
+    """
+    ref = _skill_dir() / "references"
+
+    def names(d: str) -> str:
+        folder = ref / d
+        if not folder.is_dir():
+            return "(see references/" + d + "/)"
+        return ", ".join(sorted(p.stem for p in folder.glob("*.md") if p.stem != "_index"))
+
+    return (
+        "STRATEGIST CATALOG (pick names from here; templates/spec_lock_reference.md, modes/_index.md, visual-styles/_index.md, "
+        "image-renderings/_index.md and image-palettes/_index.md are already summarized here and DO NOT need to be read)\n"
+        f"modes: {names('modes')}  (pyramid=persuade/decision; narrative=story/pitch; instructional=teach/how-to; "
+        "showcase=launch/impress; briefing=neutral status/reference)\n"
+        f"visual_style: {names('visual-styles')}\n"
+        f"image_rendering: {names('image-renderings')}\n"
+        f"image_palette: {names('image-palettes')}\n"
+        "(hint) formal/analytic->swiss-minimal|editorial|data-journalism; tech->dark-tech|blueprint|glassmorphism; "
+        "warm/cultural->ink-wash|paper-cut|soft-rounded|vintage-poster; playful->memphis|zine|pixel-art\n\n"
+        + _SPEC_LOCK_SKELETON
+    )
+
+
 def _subagent_on() -> bool:
     return os.environ.get("SLIDE_SUBAGENT", "1").lower() not in ("0", "false", "no")
 
@@ -103,6 +159,7 @@ IMPORTANT — Web UI mode:
 - Never read, write or run anything under confirm_ui/ (docs, server.py, catalogs.json, recommendations.json, result.json). At Step 4 call the confirm_gate tool directly with the recommendations object; its result (user_choices) is the confirmation. Do not summarise the Eight Confirmations in chat.
 
 Always use the confirm_gate tool at the design confirmation step to get user approval before generating slides.
+- BATCH your tool calls: read_file({"paths":[...]}) for all files you need in ONE call, and emit several independent tool calls in the same turn. Never read one file per turn.
 {slide_rule}
 Run finalize_svg.py when the pipeline is complete. Do NOT run svg_to_pptx.py — \
 PPTX export is handled on demand by the server when the user clicks Download.

@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ REPO_ROOT = Path("/app")
 SCRIPTS_DIR = REPO_ROOT / "skills" / "ppt-master" / "scripts"
 
 MAX_LIST_DIR_ENTRIES = 120
+MAX_READ_FILES = 8
 _CONFIRM_UI_ERROR = "confirm_ui files are not used in web mode - call the confirm_gate tool directly."
 _MOUNT_ALIASES = ("projects", "skills", "examples")
 
@@ -73,13 +75,21 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the contents of a file. Returns the file text.",
+            "description": (
+                "Read one file (`path`) or several (`paths`). ALWAYS batch independent reads into one call "
+                "with `paths` (max 8). Single `path` returns {content}; `paths` returns {files:[{path,content|error}]}."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Absolute or repo-relative file path"},
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Read several files in ONE call (preferred). Returns {files:[{path,content|error}]}.",
+                    },
                 },
-                "required": ["path"],
+                "required": [],
             },
         },
     },
@@ -204,11 +214,11 @@ SLIDE_TOOL_DEFINITIONS: list[dict] = [
                 "type": "object",
                 "properties": {
                     "project_path": {"type": "string", "description": "Project dir, e.g. /app/projects/foo_ppt169_20261117"},
-                    "slide_number": {"type": "integer", "description": "1-based page number matching '#### Slide NN' in design_spec.md §IX"},
+                    "slide_number": {"type": "integer", "description": "1-based page number matching '#### Slide NN' (also 'P01 - Slide 01:' / 'Page 1 -' / '第3页：' variants) in design_spec.md §IX"},
                     "filename": {"type": "string", "description": "Optional explicit '<NN>_<slug>.svg'. Default: derived from the §IX page name."},
                     "extra_instructions": {"type": "string", "description": "Optional (<=800 chars): user feedback / fix request for this slide (e.g. regeneration after review)."},
                     "with_notes": {"type": "boolean", "description": "Whether to generate speaker notes (default: true)."},
-                    "title": {"type": "string", "description": "Optional fallback title when design_spec.md §IX has no matching '#### Slide NN' block."},
+                    "title": {"type": "string", "description": "Optional fallback title when design_spec.md §IX has no matching '#### Slide NN' (also 'P01 - Slide 01:' / 'Page 1 -' / '第3页：' variants) block."},
                     "slide_spec": {"type": "string", "description": "Optional inline brief for this slide, used only when §IX has no matching block."},
                 },
                 "required": ["project_path", "slide_number"],
@@ -274,6 +284,54 @@ def _is_confirm_ui_path(p: Path) -> bool:
     return "/confirm_ui" in sp or "confirm_ui.md" in sp
 
 
+_ICON_SYNONYMS: dict[str, list[str]] = {
+    "tea": ["cup", "teapot", "mug", "coffee"], "teacup": ["cup", "mug"], "matcha": ["leaf", "cup"],
+    "ceremony": ["sparkles", "calendar-event"], "garden": ["plant", "flower", "trees"],
+    "temple": ["building-pagoda", "home"], "chart": ["chart-bar", "chart-line"], "graph": ["chart-line"],
+    "growth": ["trending-up"], "money": ["coin", "currency-dollar"], "person": ["user"], "people": ["users"],
+    "team": ["users"], "idea": ["bulb"], "global": ["world"], "security": ["shield"],
+}
+_ICON_LIB_ALIASES = {"chunk": "chunk-filled"}
+
+
+def _resolve_missing_icons(project: Path, lib_names: list[str]) -> tuple[dict[str, str], list[str]]:
+    """Fuzzy-resolve icon names missing from the library to the nearest existing icon.
+
+    Copies the match into ``<project>/icons/<lib>/`` under BOTH the resolved and
+    the requested filename so ``data-icon="<requested>"`` still resolves at finalize.
+    Returns ``(resolved {requested: lib/resolved}, unresolved [requested])``.
+    """
+    icons_root = REPO_ROOT / "skills" / "ppt-master" / "templates" / "icons"
+    resolved: dict[str, str] = {}
+    unresolved: list[str] = []
+    for raw in lib_names:
+        if "/" in raw:
+            lib, _, name = raw.partition("/")
+        else:
+            lib, name = "chunk-filled", raw
+        lib = _ICON_LIB_ALIASES.get(lib, lib)
+        libdir = icons_root / lib
+        dst = project / "icons" / lib
+        if not name or not libdir.is_dir() or (libdir / f"{name}.svg").is_file() or (dst / f"{name}.svg").is_file():
+            continue  # already satisfied by icon_sync (or nothing to resolve against)
+        stems = {f.stem for f in libdir.glob("*.svg")}
+        cands = [c for c in _ICON_SYNONYMS.get(name, []) if c in stems]
+        cands += sorted((x for x in stems if x == name or x.startswith(name + "-")), key=len)
+        cands += sorted((x for x in stems if name in x), key=len)
+        tokens = [t for t in name.split("-") if len(t) > 1]
+        cands += sorted((x for x in stems if any(t in x for t in tokens)), key=len)
+        cands = [c for c in cands if not c.endswith("-off")] or cands
+        if not cands:
+            unresolved.append(raw)
+            continue
+        best = cands[0]
+        dst.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(libdir / f"{best}.svg", dst / f"{best}.svg")
+        shutil.copy2(libdir / f"{best}.svg", dst / f"{name}.svg")
+        resolved[raw] = f"{lib}/{best}"
+    return resolved, unresolved
+
+
 async def dispatch_tool(
     name: str,
     args: dict[str, Any],
@@ -285,15 +343,27 @@ async def dispatch_tool(
     """Execute a tool call and return a JSON-serialisable result."""
 
     if name == "read_file":
-        p = _resolve_path(args["path"])
-        if _is_confirm_ui_path(p):
-            return {"error": _CONFIRM_UI_ERROR}
-        try:
-            return {"content": p.read_text(encoding="utf-8"), "path": str(p)}
-        except FileNotFoundError:
-            return {"error": f"File not found: {p}"}
-        except Exception as exc:
-            return {"error": str(exc)}
+        raw_paths = [x for x in (args.get("paths") or []) if isinstance(x, str) and x.strip()]
+        if isinstance(args.get("path"), str) and args["path"].strip():
+            raw_paths.insert(0, args["path"])
+        if not raw_paths:
+            return {"error": "read_file needs `path` or `paths`"}
+
+        def _one(rp: str) -> dict[str, Any]:
+            p = _resolve_path(rp)
+            if _is_confirm_ui_path(p):
+                return {"path": str(p), "error": _CONFIRM_UI_ERROR}
+            try:
+                return {"path": str(p), "content": p.read_text(encoding="utf-8")}
+            except FileNotFoundError:
+                return {"path": str(p), "error": f"File not found: {p}"}
+            except Exception as exc:
+                return {"path": str(p), "error": str(exc)}
+
+        if len(raw_paths) == 1 and not args.get("paths"):  # legacy single-file shape
+            r = _one(raw_paths[0])
+            return {"content": r["content"], "path": r["path"]} if "content" in r else {"error": r["error"]}
+        return {"files": [_one(x) for x in raw_paths[:MAX_READ_FILES]]}
 
     elif name == "write_file":
         p = _resolve_path(args["path"])
@@ -321,6 +391,13 @@ async def dispatch_tool(
         p = _resolve_path(args["path"])
         if _is_confirm_ui_path(p):
             return {"error": _CONFIRM_UI_ERROR}
+        if "templates/icons" in str(p).replace("\\", "/"):
+            return {
+                "error": "list_dir on templates/icons is disabled (5000+ files). Pass your desired icon names directly to "
+                "icon_sync.py in ONE batch call, e.g. run_script(script='skills/ppt-master/scripts/icon_sync.py', "
+                "args=[<project_path>, 'tabler-outline/chart-bar', 'tabler-outline/cup', ...]). Names that do not exist "
+                "are auto-resolved to the nearest icon and reported - no searching needed."
+            }
         try:
             entries = sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name))
         except FileNotFoundError:
@@ -341,12 +418,6 @@ async def dispatch_tool(
         if total > len(shown):
             out.update(total_entries=total, truncated=True)
             hint = f"Showing first {len(shown)} of {total}. Narrow with list_dir(path, pattern='<substring>')."
-            if "templates/icons" in str(p).replace("\\", "/"):
-                hint = (
-                    "Icon library is huge - do NOT list it. Pass common Tabler names directly to icon_sync.py "
-                    "(e.g. tabler-outline/chart-bar, users, target, bulb, clock, world, shield, settings, check) "
-                    "and re-pick any name it reports missing, or search with list_dir(path, pattern='chart')."
-                )
             out["hint"] = hint
         return out
 
@@ -379,10 +450,25 @@ async def dispatch_tool(
             await store.append_log(job_id, line)
 
         await proc.wait()
-        return {
-            "returncode": proc.returncode,
-            "output": "".join(output_lines[-200:]),  # last 200 lines to avoid huge tool results
-        }
+        returncode = proc.returncode
+        output = "".join(output_lines[-200:])  # last 200 lines to avoid huge tool results
+        if Path(str(script)).name == "icon_sync.py" and returncode != 0 and "[MISSING]" in output and script_args:
+            try:
+                resolved, unresolved = _resolve_missing_icons(_resolve_path(str(script_args[0])), [str(a) for a in script_args[1:]])
+            except Exception as exc:  # never let the helper break the tool
+                resolved, unresolved = {}, []
+                output += f"\n[icon auto-resolve skipped: {exc}]"
+            if resolved:
+                output += (
+                    "\n[AUTO-RESOLVED] "
+                    + "; ".join(f"{m} -> {r}" for m, r in resolved.items())
+                    + "\n(copied under both requested and resolved names - use either in data-icon; no spec edit needed)"
+                )
+            if unresolved:
+                output += "\n[STILL MISSING] " + ", ".join(unresolved)
+            if resolved and not unresolved:
+                returncode = 0
+        return {"returncode": returncode, "output": output}
 
     elif name == "confirm_gate":
         recommendations = args.get("recommendations", {})

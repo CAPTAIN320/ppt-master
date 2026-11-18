@@ -10,6 +10,7 @@ completion used by the per-slide sub-agent.
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 from typing import Any
 
@@ -47,6 +48,38 @@ def _strip_thinking_content_blocks(messages: list[dict[str, Any]]) -> list[dict[
 def _is_gemini_model(model: str) -> bool:
     """Return True if the model name indicates a Gemini model."""
     return "gemini" in model.lower()
+
+
+def _thinking_extra_body(model: str, role: str = "slide") -> dict[str, Any] | None:
+    """Per-request Gemini thinking override via LiteLLM.
+
+    NEVER use reasoning_effort: LiteLLM's router config already injects
+    google.thinking_config, so reasoning_effort -> HTTP 400 ("found both").
+    Valid levels: low | medium | high ("minimal" is rejected by the upstream).
+    role: "slide" (SLIDE_THINKING_LEVEL, default "low") or "agent"
+    (AGENT_THINKING_LEVEL, default "low"). An env value of "default"/"off"/""
+    disables the override (falls back to the proxy config).
+    """
+    if not _is_gemini_model(model):
+        return None
+    env = "SLIDE_THINKING_LEVEL" if role == "slide" else "AGENT_THINKING_LEVEL"
+    level = os.environ.get(env, "low").strip().lower()
+    if level not in ("low", "medium", "high"):
+        return None
+    return {"google": {"thinking_config": {"thinking_level": level}}}
+
+
+def _is_thinking_param_error(exc: Exception) -> bool:
+    """HTTP 400 whose body mentions thinking / thinking_config / thinking_level."""
+    response = getattr(exc, "response", None)
+    if getattr(response, "status_code", getattr(exc, "status_code", None)) != 400:
+        return False
+    try:
+        body = (response.text or "").lower()
+    except Exception:
+        body = str(exc).lower()
+    body += " " + str(exc).lower()
+    return "thinking" in body
 
 
 def _max_tokens_for(model: str) -> int:
@@ -120,13 +153,16 @@ async def call_llm_text(
     """
     gemini = _is_gemini_model(model)
     cap = max_tokens or _max_tokens_for(model)
+    thinking_ok = True
 
     def _cancelled() -> bool:
         return bool(store is not None and job_id is not None and store.is_cancelled(job_id))
 
     async def _once(mt: int) -> tuple[str, str | None]:
         if gemini:
-            resp = await client.chat.completions.create(model=model, messages=messages, max_tokens=mt, stream=False)
+            eb = _thinking_extra_body(model, "slide") if thinking_ok else None
+            kwargs: dict[str, Any] = {"extra_body": eb} if eb else {}
+            resp = await client.chat.completions.create(model=model, messages=messages, max_tokens=mt, stream=False, **kwargs)
             choice = resp.choices[0] if resp.choices else None
             if choice is None:
                 return "", None
@@ -176,6 +212,11 @@ async def call_llm_text(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if gemini and thinking_ok and _thinking_extra_body(model, "slide") and _is_thinking_param_error(exc):
+                thinking_ok = False
+                if store is not None and job_id is not None:
+                    await store.append_log(job_id, f"[{label or 'LLM'}] thinking override rejected (400); retrying without extra_body\n")
+                continue
             if cur_cap > 16000 and not token_retry_done and _is_token_limit_error(exc):
                 token_retry_done = True
                 cur_cap = 16000

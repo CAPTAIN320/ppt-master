@@ -84,8 +84,20 @@ def _pick_sections(text: str, numbers: set[int]) -> str:
 # Outline / spec_lock parsing
 # ─────────────────────────────────────────────────────────────────────────────
 
+_HEAD_LABEL = r"(?:Slide|Page|P|页|第)\s*0*(\d+)\s*(?:页)?"
+_HEAD_SEP = r"\s*[-–—:：.、]?\s*"
 _SLIDE_HEAD_RE = re.compile(
-    r"^(#{3,5})\s+(?:Slide|Page|P|页|第)\s*0*(\d+)\s*(?:页)?\s*[-–—:：.、]?\s*(.*?)\s*$",
+    r"^(#{3,5})\s+" + _HEAD_LABEL + _HEAD_SEP
+    + r"(?:(?:Slide|Page|P|页|第)\s*0*\d+\s*(?:页)?" + _HEAD_SEP + r")?"  # optional 2nd label: "P01 — Slide 01:"
+    + r"(.*?)\s*$",
+    re.IGNORECASE,
+)
+# Fallback for outlines written as bold / bulleted labels instead of markdown headings:
+#   **Slide 01: Cover**   /   - **Page 2 — Intro**
+_SLIDE_BOLD_RE = re.compile(
+    r"^\s*(?:[-*]\s+)?\*\*\s*(?:Slide|Page|P)\s*0*(\d+)\b" + _HEAD_SEP
+    + r"(?:(?:Slide|Page|P)\s*0*\d+\b" + _HEAD_SEP + r")?"
+    + r"(.*?)\s*\*{0,2}\s*$",
     re.IGNORECASE,
 )
 _ANY_HEAD_RE = re.compile(r"^#{1,5}\s")
@@ -108,17 +120,30 @@ def _field(block: str, label: str) -> str:
 
 
 def parse_outline(design_spec_text: str) -> dict[int, SlideBrief]:
-    """Parse ``#### Slide NN - Name`` blocks (also ``### Slide``/``#### Page``)."""
+    """Parse ``#### Slide NN - Name`` blocks (also ``### Slide``/``#### Page``/``#### P01 — Slide 01:``/``#### 第3页：``).
+
+    Falls back to bold/bulleted ``**Slide NN: Name**`` labels when no heading matches.
+    """
     lines = design_spec_text.splitlines()
     heads: list[tuple[int, int, str]] = []  # (line_idx, number, name)
     for i, line in enumerate(lines):
         m = _SLIDE_HEAD_RE.match(line)
         if m:
             heads.append((i, int(m.group(2)), m.group(3).strip()))
+    bold_mode = False
+    if not heads:
+        for i, line in enumerate(lines):
+            m = _SLIDE_BOLD_RE.match(line)
+            if m:
+                heads.append((i, int(m.group(1)), m.group(2).strip().strip("*").strip()))
+        bold_mode = bool(heads)
     outline: dict[int, SlideBrief] = {}
     for k, (idx, num, name) in enumerate(heads):
         end = len(lines)
         for j in range(idx + 1, len(lines)):
+            if bold_mode and (_SLIDE_BOLD_RE.match(lines[j]) or _ANY_HEAD_RE.match(lines[j])):
+                end = j
+                break
             if _ANY_HEAD_RE.match(lines[j]) and (not lines[j].startswith("#####") or _SLIDE_HEAD_RE.match(lines[j])):
                 end = j
                 break

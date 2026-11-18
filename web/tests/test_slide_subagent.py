@@ -567,7 +567,7 @@ def test_list_dir_cap_pattern_hint():
         for i in range(200):
             (icons / f"i{i}.svg").write_text("x")
         res = _run(dispatch_tool("list_dir", {"path": str(icons)}, "j", FakeStore()))
-        assert res["truncated"] and "icon_sync" in res["hint"]
+        assert "error" in res and "icon_sync" in res["error"]  # templates/icons is hard-blocked
         assert "error" in _run(dispatch_tool("list_dir", {"path": str(d / "f001.txt")}, "j", FakeStore()))
         assert "error" in _run(dispatch_tool("list_dir", {"path": str(d / "nope")}, "j", FakeStore()))
     props = next(x for x in tl.TOOL_DEFINITIONS if x["function"]["name"] == "list_dir")["function"]["parameters"]["properties"]
@@ -595,6 +595,152 @@ def test_compact_history_list_dir():
     agent_runner._assert_pairing(msgs)
     snap = json.dumps(msgs)
     assert agent_runner._compact_history(msgs, None, "claude-sonnet") == 0 and json.dumps(msgs) == snap
+
+
+# ── T20: gemini speed fixes ───────────────────────────────────────────────────
+
+
+def test_thinking_extra_body_and_call_llm_text():
+    want = {"google": {"thinking_config": {"thinking_level": "low"}}}
+    old = {k: os.environ.pop(k, None) for k in ("SLIDE_THINKING_LEVEL", "AGENT_THINKING_LEVEL")}
+    try:
+        assert llm_utils._thinking_extra_body("gemini-3.8-flash") == want
+        assert llm_utils._thinking_extra_body("claude-sonnet-5.5") is None
+        os.environ["SLIDE_THINKING_LEVEL"] = "default"
+        assert llm_utils._thinking_extra_body("gemini-3.8-flash") is None
+        os.environ["SLIDE_THINKING_LEVEL"] = "medium"
+        assert llm_utils._thinking_extra_body("gemini-3.8-flash")["google"]["thinking_config"]["thinking_level"] == "medium"
+        assert llm_utils._thinking_extra_body("gemini-3.8-flash", "agent") == want  # separate env
+        os.environ.pop("SLIDE_THINKING_LEVEL")
+
+        c = FakeClient([("ok", "stop")])
+        _run(llm_utils.call_llm_text(c, "gemini-3.8-flash", [{"role": "user", "content": "hi"}]))
+        assert c.calls[0]["extra_body"] == want and "reasoning_effort" not in c.calls[0]
+        c = FakeClient([("ok", "stop")])
+        _run(llm_utils.call_llm_text(c, "claude-x", [{"role": "user", "content": "hi"}]))
+        assert "extra_body" not in c.calls[0]
+
+        class Err(Exception):
+            def __init__(self, body):
+                self.status_code = 400
+                self.response = SimpleNamespace(status_code=400, text=body)
+
+        c = FakeClient([Err("Unknown field thinking_config"), ("ok", "stop")])
+        text, _ = _run(llm_utils.call_llm_text(c, "gemini-3.8-flash", [{"role": "user", "content": "hi"}]))
+        assert text == "ok" and "extra_body" in c.calls[0] and "extra_body" not in c.calls[1]
+    finally:
+        for k, v in old.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_parse_outline_header_variants():
+    cases = [
+        ("#### P01 \u2014 Slide 01: Cover (Chanoyu: The Way of Tea)", 1, "Cover (Chanoyu: The Way of Tea)"),
+        ("#### P02 \u2014 Slide 02: The Four Pillars \u2014 Wa, Kei", 2, "The Four Pillars \u2014 Wa, Kei"),
+        ("### Slide 01: Cover \u2014 Chanoyu", 1, "Cover \u2014 Chanoyu"),
+        ("#### Page 1 - Intro", 1, "Intro"),
+        ("#### P01: Foo", 1, "Foo"),
+        ("##### Page 02: B", 2, "B"),
+        ("#### \u7b2c3\u9875\uff1a\u5185\u5bb9", 3, "\u5185\u5bb9"),
+        ("#### Slide 03", 3, ""),
+        ("#### P7 \u2014 Page 7 \u2013 X", 7, "X"),
+        ("#### Slide 01: 2024 Plan", 1, "2024 Plan"),
+    ]
+    for head, num, name in cases:
+        o = ss.parse_outline(head + "\n- **Title**: T\n")
+        assert list(o) == [num] and o[num].name == name, (head, {k: v.name for k, v in o.items()})
+    for bad in ("### Part 1: Chapter", "#### Phase 2", "#### Page Roster"):
+        assert ss.parse_outline(bad + "\n") == {}, bad
+    # bold / bulleted fallback when no heading matches
+    o = ss.parse_outline("## IX. Pages\n**Slide 01: Cover**\n- **Title**: A\n- **Slide 2 \u2014 Intro**\n- **Layout**: grid\n")
+    assert sorted(o) == [1, 2] and o[1].name == "Cover" and o[2].name == "Intro" and o[2].layout == "grid", o
+
+
+def test_icons_block_and_auto_resolve():
+    import web.tools as tl
+    with tempfile.TemporaryDirectory() as t:
+        root = Path(t)
+        old_root = tl.REPO_ROOT
+        tl.REPO_ROOT = root
+        try:
+            lib = root / "skills" / "ppt-master" / "templates" / "icons" / "tabler-outline"
+            lib.mkdir(parents=True)
+            for n in ("cup", "teapot", "chart-bar", "chart-bar-off", "users"):
+                (lib / f"{n}.svg").write_text(f"<svg>{n}</svg>")
+            res = _run(dispatch_tool("list_dir", {"path": str(lib), "pattern": "cup"}, "j", FakeStore()))
+            assert "error" in res and "icon_sync" in res["error"] and "entries" not in res
+            proj = root / "projects" / "p"
+            proj.mkdir(parents=True)
+            resolved, unresolved = tl._resolve_missing_icons(proj, ["tabler-outline/tea", "tabler-outline/chart", "tabler-outline/users", "tabler-outline/zzzz"])
+            assert resolved["tabler-outline/tea"] == "tabler-outline/cup"
+            assert resolved["tabler-outline/chart"] == "tabler-outline/chart-bar"
+            assert "tabler-outline/users" not in resolved and unresolved == ["tabler-outline/zzzz"]
+            d = proj / "icons" / "tabler-outline"
+            assert (d / "cup.svg").is_file() and (d / "tea.svg").is_file() and (d / "chart-bar.svg").is_file() and (d / "chart.svg").is_file()
+            assert (d / "tea.svg").read_text() == "<svg>cup</svg>"
+        finally:
+            tl.REPO_ROOT = old_root
+    block = agent_runner._project_block({"path": "/app/projects/x", "canvas": "ppt169", "sources": []})
+    assert "never list_dir the icon library" in block and 'pattern=\"chart\"' not in block and "STRATEGIST CATALOG" in block
+
+
+def test_read_file_batch_and_compact_history():
+    with tempfile.TemporaryDirectory() as t:
+        a, b = Path(t) / "a.txt", Path(t) / "b.txt"
+        a.write_text("AAA"); b.write_text("BBB")
+        r = _run(dispatch_tool("read_file", {"paths": [str(a), str(b), str(Path(t) / "nope")]}, "j", FakeStore()))
+        fs = r["files"]
+        assert [f.get("content") for f in fs[:2]] == ["AAA", "BBB"] and "error" in fs[2]
+        assert _run(dispatch_tool("read_file", {"path": str(a)}, "j", FakeStore())) == {"content": "AAA", "path": str(a)}
+        assert "error" in _run(dispatch_tool("read_file", {}, "j", FakeStore()))
+        r = _run(dispatch_tool("read_file", {"path": str(a), "paths": [str(b)]}, "j", FakeStore()))
+        assert [f["content"] for f in r["files"]] == ["AAA", "BBB"]
+    schema = next(x for x in get_tool_definitions() if x["function"]["name"] == "read_file")["function"]["parameters"]
+    assert schema["properties"]["paths"]["items"] == {"type": "string"} and schema["required"] == []
+
+    def call(cid, name, args):
+        return {"id": cid, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+
+    with tempfile.TemporaryDirectory() as t:
+        proj = Path(t)
+        (proj / "design_spec.md").write_text("x"); (proj / "spec_lock.md").write_text("y")
+        ref = "/app/skills/ppt-master/references/strategist.md"
+        spec = str(proj / "design_spec.md")
+        big = json.dumps({"files": [{"path": ref, "content": "R" * 5000}, {"path": spec, "content": "S" * 5000}]})
+        msgs = [
+            {"role": "user", "content": "SKILL"}, {"role": "assistant", "content": "ready"}, {"role": "user", "content": "go"},
+            {"role": "assistant", "content": None, "tool_calls": [call("r1", "read_file", {"paths": [ref, spec]})]},
+            {"role": "tool", "tool_call_id": "r1", "content": big},
+            {"role": "assistant", "content": None, "tool_calls": [call("r2", "list_dir", {"path": "/app/y"})]},
+            {"role": "tool", "tool_call_id": "r2", "content": "ok"},
+            {"role": "assistant", "content": None, "tool_calls": [call("r3", "list_dir", {"path": "/app/z"})]},
+            {"role": "tool", "tool_call_id": "r3", "content": "ok"},
+        ]
+        freed = agent_runner._compact_history(msgs, str(proj), "gemini-3.8-flash")
+        out = json.loads(msgs[4]["content"])
+        assert freed > 0 and out["files"][0].get("compacted") and out["files"][1]["content"] == "S" * 5000
+        agent_runner._assert_pairing(msgs)
+        assert agent_runner._compact_history(msgs, str(proj), "gemini-3.8-flash") == 0
+
+
+def test_strategist_catalog_completeness():
+    import re as _re
+    from web import skill_prompt as sp
+    cat = sp.build_strategist_catalog()
+    ref = REPO / "skills" / "ppt-master" / "references"
+    for d in ("modes", "visual-styles", "image-renderings", "image-palettes"):
+        stems = [p.stem for p in (ref / d).glob("*.md") if p.stem != "_index"]
+        assert stems, d
+        for stem in stems:
+            assert stem in cat, (d, stem)
+    assert len([p for p in (ref / "modes").glob("*.md") if p.stem != "_index"]) == 5
+    lock_ref = (REPO / "skills" / "ppt-master" / "templates" / "spec_lock_reference.md").read_text(encoding="utf-8")
+    ref_heads = set(_re.findall(r"^## (\w+)", lock_ref, _re.MULTILINE))
+    skel_heads = set(_re.findall(r"^## (\w+)", sp._SPEC_LOCK_SKELETON, _re.MULTILINE))
+    assert ref_heads == skel_heads, (ref_heads ^ skel_heads)
+    assert "DO NOT need to be read" in cat and "BATCH your tool calls" in sp.get_system_prompt()
 
 
 if __name__ == "__main__":

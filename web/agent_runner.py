@@ -27,11 +27,13 @@ from openai import AsyncOpenAI
 from .job_store import JobStore
 from .llm_utils import (  # noqa: F401  (re-exported for backward compatibility)
     _is_gemini_model,
+    _is_thinking_param_error,
     _is_token_limit_error,
     _max_tokens_for,
     _strip_thinking_content_blocks,
+    _thinking_extra_body,
 )
-from .skill_prompt import get_skill_md, get_system_prompt
+from .skill_prompt import build_strategist_catalog, get_skill_md, get_system_prompt
 from .tools import TOOL_DEFINITIONS, ToolContext, dispatch_tool, get_tool_definitions, slide_subagent_enabled
 
 REPO_ROOT = Path("/app")
@@ -162,7 +164,7 @@ def _compact_history(messages: list[dict[str, Any]], project_path: str | None, m
             name, a, _tc = info
             path = a.get("path") if isinstance(a.get("path"), str) else ""
             new: str | None = None
-            if name == "read_file" and path:
+            if name == "read_file" and path and not isinstance(a.get("paths"), list):
                 base = Path(path).name
                 superseded = latest_read.get(path, i) > i
                 is_spec = base in ("design_spec.md", "spec_lock.md") and "/references/" not in path
@@ -178,6 +180,28 @@ def _compact_history(messages: list[dict[str, Any]], project_path: str | None, m
                 if should:
                     reason = "superseded by a later read" if (superseded and not is_ref) else "read earlier; call read_file again if needed"
                     new = json.dumps({"path": path, "content": f"[compacted: {len(content)} chars of {base} — {reason}]", "compacted": True})
+            elif name == "read_file" and isinstance(a.get("paths"), list):
+                # Multi-file read: compact only reference-doc entries; keep project files (spec, svg, ...) intact.
+                should_ref = spec_ready or (len(content) > 20000 and i < tail_start - 4)
+                try:
+                    payload = json.loads(content)
+                    files = payload.get("files") if isinstance(payload, dict) else None
+                except Exception:
+                    files = None
+                if should_ref and isinstance(files, list):
+                    changed = False
+                    for f in files:
+                        if not isinstance(f, dict) or not isinstance(f.get("content"), str):
+                            continue
+                        fp = str(f.get("path") or "")
+                        fbase = Path(fp).name
+                        f_is_spec = fbase in ("design_spec.md", "spec_lock.md") and "/references/" not in fp
+                        if fp and _is_reference_path(fp) and not f_is_spec and len(f["content"]) > 500:
+                            f["content"] = f"[compacted: {len(f['content'])} chars of {fbase} — read earlier; call read_file again if needed]"
+                            f["compacted"] = True
+                            changed = True
+                    if changed:
+                        new = json.dumps(payload)
             elif name == "list_dir":
                 try:
                     n = len(json.loads(content).get("entries", []))
@@ -391,13 +415,16 @@ def _project_block(project: dict) -> str:
         "Path rules: use absolute /app/... paths. (/projects/... is auto-mapped to /app/projects/... but never write outside <project_path>.)\n"
         "Command cheat-sheet (run_script, script path relative to /app, args as array):\n"
         '  icons   : skills/ppt-master/scripts/icon_sync.py  [<project_path>, "tabler-outline/chart-bar", "tabler-outline/users", ...]  '
-        "# guess common Tabler names; unknown ones are reported -> re-pick. To search use list_dir(path=\".../icons/tabler-outline\", pattern=\"chart\"); NEVER list a whole icon library.\n"
+        "# ONE batch call with ALL icons you want (guess Tabler names; 12-20 is fine). Unknown names are auto-resolved to the closest "
+        "existing icon and reported as 'resolved' - never list_dir the icon library, never re-run to hunt.\n"
         "  images  : skills/ppt-master/scripts/analyze_images.py [<project_path>/images]   (only if images/ has files)\n"
         '  gen img : skills/ppt-master/scripts/image_gen.py ["--manifest", "<project_path>/images/image_prompts.json"]   (only if confirmed image_usage includes ai)\n'
         "  qc      : skills/ppt-master/scripts/svg_quality_checker.py [<project_path>]\n"
         "  finalize: skills/ppt-master/scripts/finalize_svg.py [<project_path>]\n"
-        "Start now: read references/strategist.md + templates/design_spec_reference.md -> confirm_gate -> "
-        "write design_spec.md + spec_lock.md -> icon_sync -> (images) -> generate_slides_batch."
+        "Start now: ONE read_file(paths=[references/strategist.md, templates/design_spec_reference.md]) -> confirm_gate -> "
+        "write design_spec.md + spec_lock.md in the same turn -> ONE icon_sync batch -> (images) -> generate_slides_batch. "
+        "The STRATEGIST CATALOG below replaces spec_lock_reference.md and the 4 _index.md files - do NOT read them.\n\n"
+        + build_strategist_catalog()
     )
 
 
@@ -558,6 +585,7 @@ async def run_job(
     last_retry_cause: str | None = None  # "truncation" | "no_progress" | "unexpected"
 
     use_non_streaming = _is_gemini_model(model)
+    thinking_state = {"ok": True}  # flips False after a 400 mentioning thinking -> retry w/o extra_body
     tool_defs = get_tool_definitions()
     ctx = ToolContext(
         client=client,
@@ -622,14 +650,30 @@ async def run_job(
                 # returned intact, then capture ``thought_signature`` from
                 # ``model_extra`` below and round-trip it in the history.
                 # This avoids the "missing a thought_signature" HTTP 400.
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=outgoing,
-                    tools=tool_defs,
-                    tool_choice="auto",
-                    max_tokens=max_tokens,
-                    stream=False,
-                )
+                _eb = _thinking_extra_body(model, "agent") if thinking_state["ok"] else None
+                try:
+                    response = await client.chat.completions.create(
+                        model=model,
+                        messages=outgoing,
+                        tools=tool_defs,
+                        tool_choice="auto",
+                        max_tokens=max_tokens,
+                        stream=False,
+                        **({"extra_body": _eb} if _eb else {}),
+                    )
+                except Exception as _exc:
+                    if not (_eb and _is_thinking_param_error(_exc)):
+                        raise
+                    thinking_state["ok"] = False
+                    await store.append_log(job_id, "[Agent] thinking override rejected (400); retrying without extra_body\n")
+                    response = await client.chat.completions.create(
+                        model=model,
+                        messages=outgoing,
+                        tools=tool_defs,
+                        tool_choice="auto",
+                        max_tokens=max_tokens,
+                        stream=False,
+                    )
                 choice = response.choices[0] if response.choices else None
                 if choice is not None:
                     local_finish_reason = choice.finish_reason
