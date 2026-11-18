@@ -794,6 +794,141 @@ def test_strategist_catalog_completeness():
     assert "DO NOT need to be read" in cat and "BATCH your tool calls" in sp.get_system_prompt()
 
 
+REMOVED_IMAGE_MODELS = ("gpt-image-2", "gpt-image-1-mini", "gemini-3-pro-image", "gemini-3.1-flash-lite-image")
+
+
+class _Env:
+    """Temporarily set/unset env vars."""
+
+    def __init__(self, **kv):
+        self.kv, self.old = kv, {}
+
+    def __enter__(self):
+        for k, v in self.kv.items():
+            self.old[k] = os.environ.get(k)
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def __exit__(self, *a):
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_image_models_allowlist_parsing_and_default():
+    from web import image_models as im
+    with _Env(IMAGE_MODELS_ALLOWED=None, OPENAI_MODEL=None):
+        assert im.allowed_models() == ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gemini-3.1-flash-image"]
+        assert im.default_model() == "gpt-image-2.5-flare"
+    with _Env(IMAGE_MODELS_ALLOWED="  a-model ,b-model,, a-model ", OPENAI_MODEL=" b-model "):
+        assert im.allowed_models() == ["a-model", "b-model"]
+        assert im.default_model() == "b-model"
+        assert im.is_allowed("a-model") and not im.is_allowed("gpt-image-2") and not im.is_allowed(None)
+    with _Env(IMAGE_MODELS_ALLOWED="   ", OPENAI_MODEL=""):
+        assert len(im.allowed_models()) == 3 and im.default_model() == "gpt-image-2.5-flare"
+
+
+def test_image_models_manifest_sanitizing():
+    from web import image_models as im
+    with _Env(IMAGE_MODELS_ALLOWED=None, OPENAI_MODEL="gpt-image-2.5-flare"), tempfile.TemporaryDirectory() as t:
+        mp = Path(t) / "image_prompts.json"
+        items = [
+            {"filename": "a.png", "prompt": "p", "aspect_ratio": "16:9", "status": "Pending", "model": "gpt-image-2"},
+            {"id": "img2", "filename": "b.png", "prompt": "p", "aspect_ratio": "16:9", "status": "Pending", "model": "gemini-3.1-flash-image"},
+            {"filename": "c.png", "prompt": "p", "aspect_ratio": "16:9", "status": "Pending"},
+            {"filename": "d.png", "prompt": "p", "aspect_ratio": "16:9", "status": "Pending", "model": "gemini-3-pro-image"},
+        ]
+        mp.write_text(json.dumps({"deck_style_anchor": "x", "items": items}))
+        args, notes = im.sanitize_image_gen_call(["--manifest", str(mp), "-o", t], lambda p: Path(p))
+        assert args == ["--manifest", str(mp), "-o", t]
+        data = json.loads(mp.read_text())
+        assert data["deck_style_anchor"] == "x"
+        its = data["items"]
+        assert "model" not in its[0] and "model" not in its[3] and "model" not in its[2]
+        assert its[1]["model"] == "gemini-3.1-flash-image"
+        assert len(notes) == 2
+        assert notes[0] == "[image-model-allowlist] item a.png: model 'gpt-image-2' not allowed -> using default 'gpt-image-2.5-flare'"
+        assert "item d.png" in notes[1] and "gemini-3-pro-image" in notes[1]
+        assert not list(Path(t).glob("*.tmp"))
+        # second pass is a no-op
+        assert im.sanitize_manifest(mp) == []
+        # --manifest=<path> form
+        mp.write_text(json.dumps({"items": [{"filename": "z.png", "model": "gpt-image-1-mini"}]}))
+        _, notes = im.sanitize_image_gen_call([f"--manifest={mp}"], lambda p: Path(p))
+        assert len(notes) == 1 and "model" not in json.loads(mp.read_text())["items"][0]
+
+
+def test_image_models_cli_flag_sanitizing():
+    from web import image_models as im
+    with _Env(IMAGE_MODELS_ALLOWED=None, OPENAI_MODEL=None):
+        args, notes = im.sanitize_image_gen_call(["a prompt", "--model", "gpt-image-2", "--aspect_ratio", "16:9"], lambda p: Path(p))
+        assert args == ["a prompt", "--aspect_ratio", "16:9"]
+        assert notes == ["[image-model-allowlist] cli: model 'gpt-image-2' not allowed -> using default 'gpt-image-2.5-flare'"]
+        args, notes = im.sanitize_image_gen_call(["p", "-m", "gpt-image-1-mini"], lambda p: Path(p))
+        assert args == ["p"] and len(notes) == 1
+        args, notes = im.sanitize_image_gen_call(["p", "--model=gemini-3-pro-image", "-f", "x"], lambda p: Path(p))
+        assert args == ["p", "-f", "x"] and len(notes) == 1
+        for ok in ("gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gemini-3.1-flash-image"):
+            args, notes = im.sanitize_image_gen_call(["p", "--model", ok], lambda p: Path(p))
+            assert args == ["p", "--model", ok] and notes == []
+
+
+def test_image_models_failure_safe():
+    from web import image_models as im
+    with _Env(IMAGE_MODELS_ALLOWED=None, OPENAI_MODEL=None), tempfile.TemporaryDirectory() as t:
+        bad = Path(t) / "bad.json"
+        bad.write_text("{not json")
+        args, notes = im.sanitize_image_gen_call(["--manifest", str(bad)], lambda p: Path(p))
+        assert args == ["--manifest", str(bad)] and notes == [] and bad.read_text() == "{not json"
+        for body in ('[1,2]', '{"items": "nope"}', '{"items": [1, null, {"model": 5}]}'):
+            bad.write_text(body)
+            args, notes = im.sanitize_image_gen_call(["--manifest", str(bad)], lambda p: Path(p))
+            assert args == ["--manifest", str(bad)]
+        # missing manifest file, and a resolver that raises
+        args, notes = im.sanitize_image_gen_call(["--manifest", str(Path(t) / "none.json")], lambda p: Path(p))
+        assert notes == []
+
+        def boom(p):
+            raise RuntimeError("x")
+        args, notes = im.sanitize_image_gen_call(["--manifest", "m.json", "--model", "gpt-image-2"], boom)
+        assert args == ["--manifest", "m.json"] and len(notes) == 1  # CLI part still applied
+        # dispatch_tool path: a malformed manifest must not break run_script
+        import web.tools as tl
+        old = tl.REPO_ROOT
+        tl.REPO_ROOT = Path(t)
+        try:
+            sd = Path(t) / "skills" / "ppt-master" / "scripts"
+            sd.mkdir(parents=True)
+            (sd / "image_gen.py").write_text("import sys; print('ARGS', sys.argv[1:])")
+            res = _run(dispatch_tool("run_script", {"script": "skills/ppt-master/scripts/image_gen.py",
+                                                    "args": ["--manifest", str(bad), "--model", "gpt-image-2"]}, "j", FakeStore()))
+            assert res["returncode"] == 0 and "--model" not in res["output"].split("[image-model-allowlist]")[0]
+            assert "[image-model-allowlist] cli: model 'gpt-image-2' not allowed" in res["output"]
+        finally:
+            tl.REPO_ROOT = old
+
+
+def test_project_block_lists_image_models():
+    with _Env(IMAGE_MODELS_ALLOWED=None, OPENAI_MODEL=None):
+        block = agent_runner._project_block({"path": "/app/projects/x", "canvas": "ppt169", "sources": []})
+        sec = block.split("IMAGE MODELS", 1)[1].split("STRATEGIST CATALOG", 1)[0]
+        assert len(sec) < 900, len(sec)
+        assert "default = gpt-image-2.5-flare" in sec
+        for n in ("gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gemini-3.1-flash-image"):
+            assert n in sec
+        import re as _re
+        for n in REMOVED_IMAGE_MODELS:  # exact-token check ('gpt-image-2' is a prefix of the allowed 2.5 names)
+            assert not _re.search(r"(?<![\w.-])" + _re.escape(n) + r"(?![\w.-])", block), n
+        assert "Leave `model` unset" in sec
+    with _Env(IMAGE_MODELS_ALLOWED="gpt-image-2.5-flare,x-model", OPENAI_MODEL="gpt-image-2.5-flare"):
+        sec = agent_runner._project_block({"path": "/p", "sources": []})
+        assert "x-model" in sec and "gpt-image-2.5-sunburst" not in sec
+
+
 if __name__ == "__main__":
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

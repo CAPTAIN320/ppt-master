@@ -24,6 +24,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from .image_models import image_models_block
 from .job_store import JobStore
 from .llm_utils import (  # noqa: F401  (re-exported for backward compatibility)
     _detect_model_family,
@@ -426,6 +427,8 @@ def _project_block(project: dict) -> str:
         "Start now: ONE read_file(paths=[references/strategist.md, templates/design_spec_reference.md]) -> confirm_gate -> "
         "write design_spec.md + spec_lock.md in the same turn -> ONE icon_sync batch -> (images) -> generate_slides_batch. "
         "The STRATEGIST CATALOG below replaces spec_lock_reference.md and the 4 _index.md files - do NOT read them.\n\n"
+        + image_models_block()
+        + "\n"
         + build_strategist_catalog()
     )
 
