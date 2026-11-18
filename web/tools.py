@@ -433,8 +433,18 @@ async def dispatch_tool(
             }
 
         script_path = _resolve_path(script)
+        allowlist_notes: list[str] = []
+        if Path(str(script)).name == "image_gen.py":
+            try:  # enforce the image-model allowlist; never let this break the run
+                from .image_models import sanitize_image_gen_call
+
+                script_args, allowlist_notes = sanitize_image_gen_call([str(a) for a in script_args], _resolve_path)
+            except Exception:
+                allowlist_notes = []
         cmd = ["python3", str(script_path)] + [str(a) for a in script_args]
         await store.append_log(job_id, f"\n$ {' '.join(cmd)}\n")
+        for note in allowlist_notes:
+            await store.append_log(job_id, note + "\n")
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -452,6 +462,8 @@ async def dispatch_tool(
         await proc.wait()
         returncode = proc.returncode
         output = "".join(output_lines[-200:])  # last 200 lines to avoid huge tool results
+        if allowlist_notes:
+            output += "\n" + "\n".join(allowlist_notes) + "\n"
         if Path(str(script)).name == "icon_sync.py" and returncode != 0 and "[MISSING]" in output and script_args:
             try:
                 resolved, unresolved = _resolve_missing_icons(_resolve_path(str(script_args[0])), [str(a) for a in script_args[1:]])
