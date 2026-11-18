@@ -26,12 +26,14 @@ from openai import AsyncOpenAI
 
 from .job_store import JobStore
 from .llm_utils import (  # noqa: F401  (re-exported for backward compatibility)
+    _detect_model_family,
     _is_gemini_model,
     _is_thinking_param_error,
     _is_token_limit_error,
     _max_tokens_for,
     _strip_thinking_content_blocks,
     _thinking_extra_body,
+    _thinking_override_kwargs,
 )
 from .skill_prompt import build_strategist_catalog, get_skill_md, get_system_prompt
 from .tools import TOOL_DEFINITIONS, ToolContext, dispatch_tool, get_tool_definitions, slide_subagent_enabled
@@ -665,7 +667,7 @@ async def run_job(
                     if not (_eb and _is_thinking_param_error(_exc)):
                         raise
                     thinking_state["ok"] = False
-                    await store.append_log(job_id, "[Agent] thinking override rejected (400); retrying without extra_body\n")
+                    await store.append_log(job_id, "[Agent] thinking/effort override rejected; retrying without override\n")
                     response = await client.chat.completions.create(
                         model=model,
                         messages=outgoing,
@@ -707,55 +709,71 @@ async def run_job(
                 # ── Streaming path (non-Gemini) ───────────────────────────
                 tool_calls_raw: dict[int, dict] = {}  # index → partial tool call
 
-                stream = await client.chat.completions.create(
-                    model=model,
-                    messages=outgoing,
-                    tools=tool_defs,
-                    tool_choice="auto",
-                    max_tokens=max_tokens,
-                    stream=True,
-                )
+                _eb = _thinking_extra_body(model, "agent") if thinking_state["ok"] else None
 
-                async for chunk in stream:
-                    choice = chunk.choices[0] if chunk.choices else None
-                    if choice is None:
-                        continue
+                async def _consume_stream(extra_body: dict[str, Any] | None) -> None:
+                    nonlocal local_text, local_finish_reason
+                    stream = await client.chat.completions.create(
+                        model=model,
+                        messages=outgoing,
+                        tools=tool_defs,
+                        tool_choice="auto",
+                        max_tokens=max_tokens,
+                        stream=True,
+                        **({"extra_body": extra_body} if extra_body else {}),
+                    )
 
-                    delta = choice.delta
+                    async for chunk in stream:
+                        choice = chunk.choices[0] if chunk.choices else None
+                        if choice is None:
+                            continue
 
-                    # Track finish_reason across all chunks (fix plan Step 1)
-                    # — previously only checked once, inline, to end the read
-                    # loop on "stop". Now captured regardless of value so
-                    # "length" (truncation) and any other terminal reason are
-                    # visible to the completion-detection logic below.
-                    if choice.finish_reason:
-                        local_finish_reason = choice.finish_reason
+                        delta = choice.delta
 
-                    # Collect text
-                    if delta.content:
-                        local_text += delta.content
-                        await store.append_log(job_id, delta.content)
+                        # Track finish_reason across all chunks (fix plan Step 1)
+                        # — previously only checked once, inline, to end the read
+                        # loop on "stop". Now captured regardless of value so
+                        # "length" (truncation) and any other terminal reason are
+                        # visible to the completion-detection logic below.
+                        if choice.finish_reason:
+                            local_finish_reason = choice.finish_reason
 
-                    # Collect tool call fragments
-                    if delta.tool_calls:
-                        for tc_delta in delta.tool_calls:
-                            idx = tc_delta.index
-                            if idx not in tool_calls_raw:
-                                tool_calls_raw[idx] = {
-                                    "id": tc_delta.id or "",
-                                    "type": "function",
-                                    "function": {"name": "", "arguments": ""},
-                                }
-                            if tc_delta.id:
-                                tool_calls_raw[idx]["id"] = tc_delta.id
-                            if tc_delta.function:
-                                if tc_delta.function.name:
-                                    tool_calls_raw[idx]["function"]["name"] += tc_delta.function.name
-                                if tc_delta.function.arguments:
-                                    tool_calls_raw[idx]["function"]["arguments"] += tc_delta.function.arguments
+                        # Collect text
+                        if delta.content:
+                            local_text += delta.content
+                            await store.append_log(job_id, delta.content)
 
-                    if choice.finish_reason == "stop":
-                        break
+                        # Collect tool call fragments
+                        if delta.tool_calls:
+                            for tc_delta in delta.tool_calls:
+                                idx = tc_delta.index
+                                if idx not in tool_calls_raw:
+                                    tool_calls_raw[idx] = {
+                                        "id": tc_delta.id or "",
+                                        "type": "function",
+                                        "function": {"name": "", "arguments": ""},
+                                    }
+                                if tc_delta.id:
+                                    tool_calls_raw[idx]["id"] = tc_delta.id
+                                if tc_delta.function:
+                                    if tc_delta.function.name:
+                                        tool_calls_raw[idx]["function"]["name"] += tc_delta.function.name
+                                    if tc_delta.function.arguments:
+                                        tool_calls_raw[idx]["function"]["arguments"] += tc_delta.function.arguments
+
+                        if choice.finish_reason == "stop":
+                            break
+
+                # HTTP 400/422 may surface on create() or on the first chunk,
+                # before any tokens arrive; retry once without the override.
+                try:
+                    await _consume_stream(_eb)
+                except Exception as _exc:
+                    if not (_eb and not local_text and not tool_calls_raw and _is_thinking_param_error(_exc)):
+                        raise
+                    thinking_state["ok"] = False
+                    await store.append_log(job_id, "[Agent] thinking/effort override rejected; retrying without override\n")
+                    await _consume_stream(None)
 
                 local_tool_calls = [tool_calls_raw[i] for i in sorted(tool_calls_raw.keys())]
 

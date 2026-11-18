@@ -601,33 +601,84 @@ def test_compact_history_list_dir():
 
 
 def test_thinking_extra_body_and_call_llm_text():
-    want = {"google": {"thinking_config": {"thinking_level": "low"}}}
+    def g(level):
+        return {"thinking_config": {"thinking_level": level}}
+
+    want = {"google": g("low")}
     old = {k: os.environ.pop(k, None) for k in ("SLIDE_THINKING_LEVEL", "AGENT_THINKING_LEVEL")}
     try:
-        assert llm_utils._thinking_extra_body("gemini-3.8-flash") == want
-        assert llm_utils._thinking_extra_body("claude-sonnet-5.5") is None
-        os.environ["SLIDE_THINKING_LEVEL"] = "default"
-        assert llm_utils._thinking_extra_body("gemini-3.8-flash") is None
+        fam = llm_utils._detect_model_family
+        for m in ("gemini-3.8-flash", "gemini-4-argon", "gemini-4-argon-long", "gemini-5.0-pro-preview", "litellm/gemini-5-flash"):
+            assert fam(m) == "gemini", m
+        for m in ("claude-sonnet-5.5", "claude-haiku-5.5", "claude-opus-6.0", "anthropic/claude-4", "litellm/claude-sonnet-6.0"):
+            assert fam(m) == "claude", m
+        for m in ("gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna", "gpt-5.4", "gpt-7-turbo", "gpt-7", "o1-pro", "o3-mini", "o3-pro", "o4-high", "o4-mini", "openai/gpt-5.4"):
+            assert fam(m) == "openai", m
+        for m in ("GLM-5.3", "glm-6"):
+            assert fam(m) == "glm", m
+        for m in ("dolphin-mistral-24b", "Qwen3-30B-abliterated", "huihui-x", "ollama/orion"):
+            assert fam(m) == "other", m
+        assert llm_utils._is_gemini_model("Gemini-4-Argon") and not llm_utils._is_gemini_model("gpt-5.4")
+
+        eb = llm_utils._thinking_extra_body
+        assert eb("gemini-3.8-flash") == want and eb("gemini-5.0-pro") == want
+        assert eb("gemini-4-argon-long") == {"google": g("low"), "extra_body": {"google": g("low")}}
+        for m in ("claude-sonnet-5.5", "claude-opus-6.0"):
+            assert eb(m) == {"output_config": {"effort": "low"}}, m
+        for m in ("gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna", "gpt-5.4", "gpt-7.0", "gpt-7-turbo", "o3-mini", "o4-high", "GLM-5.3", "glm-6"):
+            assert eb(m) == {"reasoning_effort": "low"}, m
+        assert eb("dolphin-mistral-24b") is None
+        assert "reasoning_effort" not in str(eb("gemini-3.8-flash"))
+        assert llm_utils._thinking_override_kwargs("gpt-5.4") == {"extra_body": {"reasoning_effort": "low"}}
+        assert llm_utils._thinking_override_kwargs("dolphin-mistral-24b") == {}
+        for off in ("default", "off", "none", ""):
+            os.environ["SLIDE_THINKING_LEVEL"] = off
+            for m in ("gemini-3.8-flash", "claude-sonnet-5.5", "gpt-6.1-sol", "GLM-5.3"):
+                assert eb(m) is None, (off, m)
         os.environ["SLIDE_THINKING_LEVEL"] = "medium"
-        assert llm_utils._thinking_extra_body("gemini-3.8-flash")["google"]["thinking_config"]["thinking_level"] == "medium"
-        assert llm_utils._thinking_extra_body("gemini-3.8-flash", "agent") == want  # separate env
+        assert eb("gemini-3.8-flash")["google"]["thinking_config"]["thinking_level"] == "medium"
+        assert eb("claude-sonnet-5.5") == {"output_config": {"effort": "medium"}}
+        assert eb("gpt-6.1-sol") == {"reasoning_effort": "medium"}
+        assert eb("gemini-3.8-flash", "agent") == want  # separate env
         os.environ.pop("SLIDE_THINKING_LEVEL")
 
+        msgs = [{"role": "user", "content": "hi"}]
         c = FakeClient([("ok", "stop")])
-        _run(llm_utils.call_llm_text(c, "gemini-3.8-flash", [{"role": "user", "content": "hi"}]))
-        assert c.calls[0]["extra_body"] == want and "reasoning_effort" not in c.calls[0]
+        _run(llm_utils.call_llm_text(c, "gemini-3.8-flash", msgs))
+        assert c.calls[0]["extra_body"] == want and "reasoning_effort" not in c.calls[0] and c.calls[0]["stream"] is False
         c = FakeClient([("ok", "stop")])
-        _run(llm_utils.call_llm_text(c, "claude-x", [{"role": "user", "content": "hi"}]))
+        _run(llm_utils.call_llm_text(c, "claude-sonnet-5.5", msgs))
+        assert c.calls[0]["stream"] is True and c.calls[0]["extra_body"] == {"output_config": {"effort": "low"}}
+        c = FakeClient([("ok", "stop")])
+        _run(llm_utils.call_llm_text(c, "gpt-6.1-sol", msgs))
+        assert c.calls[0]["stream"] is True and c.calls[0]["extra_body"] == {"reasoning_effort": "low"}
+        c = FakeClient([("ok", "stop")])
+        _run(llm_utils.call_llm_text(c, "dolphin-mistral-24b", msgs))
         assert "extra_body" not in c.calls[0]
 
         class Err(Exception):
-            def __init__(self, body):
-                self.status_code = 400
-                self.response = SimpleNamespace(status_code=400, text=body)
+            def __init__(self, body, status=400):
+                super().__init__(body)
+                self.status_code = status
+                self.response = SimpleNamespace(status_code=status, text=body)
+
+        assert llm_utils._is_thinking_param_error(Err("Unsupported parameter: reasoning_effort"))
+        assert llm_utils._is_thinking_param_error(Err("Extra inputs are not permitted", 422))
+        assert not llm_utils._is_thinking_param_error(Err("max_tokens is too large"))
+        assert not llm_utils._is_thinking_param_error(Err("Unsupported parameter: reasoning_effort", 500))
 
         c = FakeClient([Err("Unknown field thinking_config"), ("ok", "stop")])
-        text, _ = _run(llm_utils.call_llm_text(c, "gemini-3.8-flash", [{"role": "user", "content": "hi"}]))
+        text, _ = _run(llm_utils.call_llm_text(c, "gemini-3.8-flash", msgs))
         assert text == "ok" and "extra_body" in c.calls[0] and "extra_body" not in c.calls[1]
+        for m, body in (("gpt-5.4", "Unsupported parameter: reasoning_effort"), ("claude-sonnet-5.5", "Unknown field output_config")):
+            c = FakeClient([Err(body), ("ok", "stop")])
+            text, _ = _run(llm_utils.call_llm_text(c, m, msgs))
+            assert text == "ok" and len(c.calls) == 2, m
+            assert c.calls[0]["stream"] and "extra_body" in c.calls[0] and "extra_body" not in c.calls[1], m
+        # token-limit 400 still takes the 16000 path, keeping the override
+        c = FakeClient([Err("max_tokens is too large"), ("ok", "stop")])
+        _run(llm_utils.call_llm_text(c, "gpt-5.4", msgs))
+        assert c.calls[1]["max_tokens"] == 16000 and "extra_body" in c.calls[1]
     finally:
         for k, v in old.items():
             os.environ.pop(k, None)
